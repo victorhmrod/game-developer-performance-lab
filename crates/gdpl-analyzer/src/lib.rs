@@ -83,6 +83,46 @@ pub struct FrameAnalysis {
     pub warnings: Vec<&'static str>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SwapChainActivity {
+    pub address: String,
+    pub rows: usize,
+}
+
+/// Identify streams belonging to one PID without pooling them.
+pub fn presentmon_swap_chains(
+    reader: impl Read,
+    pid: u32,
+) -> Result<Vec<SwapChainActivity>, Box<dyn Error>> {
+    let mut csv = csv::Reader::from_reader(reader);
+    let headers = csv.headers()?.clone();
+    let process = headers
+        .iter()
+        .position(|v| v == "ProcessID")
+        .ok_or("missing PresentMon column: ProcessID")?;
+    let swap = headers
+        .iter()
+        .position(|v| v == "SwapChainAddress")
+        .ok_or("missing PresentMon column: SwapChainAddress")?;
+    let mut streams = std::collections::BTreeMap::<String, usize>::new();
+    for row in csv.records() {
+        let row = row?;
+        let row_pid: u32 = row[process].parse().map_err(|_| "invalid ProcessID")?;
+        if row_pid != pid {
+            continue;
+        }
+        let address = row[swap].trim().to_ascii_lowercase();
+        if address.is_empty() {
+            return Err("empty swap chain address".into());
+        }
+        *streams.entry(address).or_default() += 1;
+    }
+    Ok(streams
+        .into_iter()
+        .map(|(address, rows)| SwapChainActivity { address, rows })
+        .collect())
+}
+
 /// Import PresentMon CSV output. No capture completeness is inferred from CSV rows.
 pub fn analyze_presentmon(
     reader: impl Read,
@@ -237,6 +277,23 @@ mod tests {
                 20.
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn discovers_streams_for_only_the_selected_process() {
+        let csv = b"ProcessID,SwapChainAddress,MsBetweenDisplayChange\n1,0xA,10\n1,0xa,20\n1,0xB,30\n2,0xC,20\n";
+        assert_eq!(
+            presentmon_swap_chains(&csv[..], 1).unwrap(),
+            vec![
+                SwapChainActivity {
+                    address: "0xa".into(),
+                    rows: 2
+                },
+                SwapChainActivity {
+                    address: "0xb".into(),
+                    rows: 1
+                },
+            ]
         );
     }
     #[test]

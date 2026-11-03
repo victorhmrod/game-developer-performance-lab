@@ -1,4 +1,4 @@
-use gdpl_analyzer::FrameAnalysis;
+use gdpl_analyzer::{FrameAnalysis, SwapChainActivity};
 use serde::Serialize;
 use std::{
     error::Error,
@@ -17,7 +17,7 @@ use std::{
 pub struct Options {
     pub exe: PathBuf,
     pub presentmon: Option<PathBuf>,
-    pub swap_chain: String,
+    pub swap_chain: Option<String>,
     pub warmup: u64,
     pub duration: u64,
     pub output: PathBuf,
@@ -51,6 +51,13 @@ struct Report {
     measurement_validity: &'static str,
     error: Option<String>,
     analysis: Option<FrameAnalysis>,
+    swap_chains: Vec<SwapChainActivity>,
+    capture_integrity: &'static str,
+    statistical_validity: &'static str,
+    reproducibility: &'static str,
+    performance_target: &'static str,
+    diagnostics_error: Option<String>,
+    etw_session_name: String,
     warnings: Vec<&'static str>,
 }
 
@@ -77,22 +84,19 @@ fn find_backend(explicit: Option<&Path>) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 // Inspect help before using the documented console switches. Never wait indefinitely.
-fn probe(path: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
+fn probe(path: &Path, directory: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let help_path = directory.join("help.txt");
     let mut child = OwnedChild(
         Command::new(path)
             .arg("--help")
             .stdin(Stdio::null())
             .stdout(File::create(&help_path)?)
-            .stderr(Stdio::null())
+            .stderr(File::create(directory.join("help-stderr.txt"))?)
             .spawn()?,
     );
     let start = Instant::now();
     loop {
-        if let Some(status) = child.0.try_wait()? {
-            if !status.success() {
-                return Err("PresentMon --help failed".into());
-            }
+        if child.0.try_wait()?.is_some() {
             break;
         }
         if start.elapsed() > Duration::from_secs(5) {
@@ -100,7 +104,11 @@ fn probe(path: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
         }
         thread::sleep(Duration::from_millis(25));
     }
-    let help = fs::read_to_string(help_path)?;
+    let help = format!(
+        "{}\n{}",
+        fs::read_to_string(help_path)?,
+        fs::read_to_string(directory.join("help-stderr.txt"))?
+    );
     for option in [
         "--process_id",
         "--output_file",
@@ -113,7 +121,10 @@ fn probe(path: &Path, directory: &Path) -> Result<(), Box<dyn Error>> {
             return Err(format!("PresentMon help does not advertise {option}").into());
         }
     }
-    Ok(())
+    Ok(help
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PresentMon "))
+        .map(str::to_owned))
 }
 
 pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
@@ -123,17 +134,17 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
     if options.duration == 0
         || options.duration > 3600
         || options.warmup > 3600
-        || options.swap_chain.is_empty()
+        || options.swap_chain.as_ref().is_some_and(String::is_empty)
     {
         return Err(
-            "duration must be 1–3600 seconds, warmup at most 3600 seconds, and swap chain nonempty"
+            "duration must be 1–3600 seconds, warmup at most 3600 seconds, and any swap chain must be nonempty"
                 .into(),
         );
     }
     let exe = fs::canonicalize(&options.exe)?;
     let backend = find_backend(options.presentmon.as_deref())?;
     let work = tempfile::tempdir()?;
-    probe(&backend, work.path())?;
+    let backend_version = probe(&backend, work.path())?;
     // Reserve the result path before launching anything; never overwrite previous evidence.
     let mut output = OpenOptions::new()
         .write(true)
@@ -150,7 +161,9 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             .spawn()?,
     );
     let pid = target.0.id();
+    let session = format!("GDPL-{}-{started_unix_ms}", std::process::id());
     let mut execution = "completed".to_string();
+    let mut swap_chains = Vec::new();
     let result = (|| -> Result<FrameAnalysis, Box<dyn Error>> {
         let warmup_start = Instant::now();
         while warmup_start.elapsed() < Duration::from_secs(options.warmup) {
@@ -170,7 +183,6 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         }
         let csv = work.path().join("capture.csv");
         let log = File::create(work.path().join("presentmon.log"))?;
-        let session = format!("GDPL-{}-{started_unix_ms}", std::process::id());
         let mut capture = OwnedChild(
             Command::new(&backend)
                 .args(["--process_id", &pid.to_string(), "--output_file"])
@@ -210,7 +222,18 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             }
             thread::sleep(Duration::from_millis(25));
         }
-        gdpl_analyzer::analyze_presentmon(File::open(csv)?, pid, &options.swap_chain, 50.)
+        swap_chains = gdpl_analyzer::presentmon_swap_chains(File::open(&csv)?, pid)?;
+        let selected = match &options.swap_chain {
+            Some(address) => address.as_str(),
+            None if swap_chains.len() == 1 => &swap_chains[0].address,
+            None if swap_chains.is_empty() => {
+                return Err("no swap chains observed for target process".into());
+            }
+            None => {
+                return Err("multiple swap chains observed; select one using --swap-chain".into());
+            }
+        };
+        gdpl_analyzer::analyze_presentmon(File::open(csv)?, pid, selected, 50.)
     })();
     drop(target);
     let (analysis, error) = match result {
@@ -218,6 +241,10 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         Err(error) => {
             execution = if cancelled.load(Ordering::SeqCst) {
                 "cancelled"
+            } else if error.to_string()
+                == "multiple swap chains observed; select one using --swap-chain"
+            {
+                "inconclusive"
             } else {
                 "failed"
             }
@@ -225,21 +252,32 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             (None, Some(error.to_string()))
         }
     };
-    if let Some(directory) = options.diagnostics {
-        fs::create_dir(&directory)?;
-        for file in ["help.txt", "presentmon.log", "capture.csv"] {
-            let source = work.path().join(file);
-            if source.exists() {
-                fs::copy(source, directory.join(file))?;
+    let diagnostics_error = options.diagnostics.and_then(|directory| {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            fs::create_dir(&directory)?;
+            for file in [
+                "help.txt",
+                "help-stderr.txt",
+                "presentmon.log",
+                "capture.csv",
+            ] {
+                let source = work.path().join(file);
+                if source.exists() {
+                    fs::copy(source, directory.join(file))?;
+                }
             }
-        }
-    }
+            Ok(())
+        })();
+        result
+            .err()
+            .map(|error| format!("{}: {error}", directory.display()))
+    });
     let report = Report {
         schema_version: 1,
         gdpl_version: env!("CARGO_PKG_VERSION"),
         backend: "PresentMon console",
         backend_path: backend.display().to_string(),
-        backend_version: None,
+        backend_version,
         target_executable: exe.display().to_string(),
         target_arguments: options.arguments,
         target_pid: pid,
@@ -251,6 +289,13 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         measurement_validity: "inconclusive",
         error,
         analysis,
+        swap_chains,
+        capture_integrity: "unknown",
+        statistical_validity: "inconclusive",
+        reproducibility: "not_assessed",
+        performance_target: "not_evaluated",
+        diagnostics_error,
+        etw_session_name: session,
         warnings: vec![
             "Experimental backend; real PresentMon capture has not been verified",
             "Capture start and display timestamps, event loss, and coverage are not verified",

@@ -68,7 +68,7 @@ enum BenchmarkCommand {
         #[arg(long)]
         presentmon: Option<PathBuf>,
         #[arg(long)]
-        swap_chain: String,
+        swap_chain: Option<String>,
         #[arg(long, default_value_t = 10)]
         warmup: u64,
         #[arg(long, default_value_t = 60)]

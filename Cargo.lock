@@ -194,6 +194,7 @@ dependencies = [
  "gdpl-analyzer",
  "gdpl-core",
  "gdpl-hardware",
+ "gdpl-stress",
  "serde",
  "serde_json",
  "sysinfo",
@@ -221,6 +222,16 @@ name = "gdpl-hardware"
 version = "0.1.0"
 dependencies = [
  "gdpl-core",
+ "sysinfo",
+]
+
+[[package]]
+name = "gdpl-stress"
+version = "0.1.0"
+dependencies = [
+ "gdpl-core",
+ "serde",
+ "serde_json",
  "sysinfo",
 ]
 

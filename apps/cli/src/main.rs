@@ -34,6 +34,11 @@ enum Commands {
         #[command(subcommand)]
         command: BenchmarkCommand,
     },
+    /// Execute a bounded synthetic stress scenario.
+    Stress {
+        #[command(subcommand)]
+        command: StressCommand,
+    },
     /// Analyze a previously captured PresentMon CSV.
     Frames {
         #[command(subcommand)]
@@ -41,6 +46,15 @@ enum Commands {
     },
     /// Print environment and feature availability.
     Doctor,
+}
+#[derive(Subcommand)]
+enum StressCommand {
+    Run {
+        #[arg(long)]
+        scenario: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 #[derive(Subcommand)]
 enum FrameCommand {
@@ -111,8 +125,35 @@ impl Drop for ChildGuard {
     }
 }
 
-fn run() -> Result<bool, Box<dyn std::error::Error>> {
+fn run() -> Result<u8, Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Commands::Stress {
+            command: StressCommand::Run { scenario, output },
+        } => {
+            let config: gdpl_stress::Config = serde_json::from_reader(fs::File::open(scenario)?)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output)?;
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let flag = cancelled.clone();
+            ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
+            let report = gdpl_stress::run(
+                config,
+                &mut gdpl_stress::SyntheticMemory::default(),
+                &cancelled,
+            )?;
+            serde_json::to_writer_pretty(&mut file, &report)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            println!("Stress run: {}", report.termination);
+            return Ok(match report.termination.as_str() {
+                "completed" => 0,
+                "cancelled" => 3,
+                "memory_limit" | "cpu_limit" | "duration_limit" => 4,
+                _ => 5,
+            });
+        }
         Commands::Frames {
             command:
                 FrameCommand::Analyze {
@@ -167,7 +208,8 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 output,
                 diagnostics,
                 arguments,
-            });
+            })
+            .map(|valid| if valid { 0 } else { 2 });
         }
         Commands::Benchmark {
             command:
@@ -277,15 +319,14 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             file.write_all(b"\n")?;
             file.sync_all()?;
             println!("Benchmark saved; valid: {}", result.valid);
-            return Ok(result.valid);
+            return Ok(if result.valid { 0 } else { 2 });
         }
     }
-    Ok(true)
+    Ok(0)
 }
 fn main() -> ExitCode {
     match run() {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(2),
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE

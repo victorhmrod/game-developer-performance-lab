@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
+gdpl-stress = { path = "../../crates/gdpl-stress" }
 gdpl-analyzer = { path = "../../crates/gdpl-analyzer" }
 gdpl-core = { path = "../../crates/gdpl-core" }
 gdpl-hardware = { path = "../../crates/gdpl-hardware" }

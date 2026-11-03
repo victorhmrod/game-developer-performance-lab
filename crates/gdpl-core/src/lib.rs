@@ -49,6 +49,7 @@ pub struct AdapterDescription {
 
 /// A bounded stress plan; workload semantics are defined by the scenario provider.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StressScenario {
     pub id: String,
     pub parameters: std::collections::BTreeMap<String, String>,

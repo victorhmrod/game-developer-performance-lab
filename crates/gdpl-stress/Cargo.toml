@@ -1,0 +1,11 @@
+[package]
+name = "gdpl-stress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+gdpl-core = { path = "../gdpl-core" }
+serde.workspace = true
+sysinfo.workspace = true
+[dev-dependencies]
+serde_json.workspace = true

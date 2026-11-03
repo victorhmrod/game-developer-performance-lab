@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gdpl-core", "crates/gdpl-hardware", "crates/gdpl-analyzer", "apps/cli"]
+members = ["crates/gdpl-core", "crates/gdpl-hardware", "crates/gdpl-analyzer", "crates/gdpl-stress", "apps/cli"]
 
 [workspace.package]
 version = "0.1.0"

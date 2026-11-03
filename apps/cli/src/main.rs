@@ -77,6 +77,8 @@ enum BenchmarkCommand {
         warmup: u64,
         #[arg(long, default_value_t = 60)]
         duration: u64,
+        #[arg(long, default_value_t = 5)]
+        shutdown_timeout: u64,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -147,6 +149,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                     swap_chain,
                     warmup,
                     duration,
+                    shutdown_timeout,
                     output,
                     diagnostics,
                     arguments,
@@ -160,6 +163,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 swap_chain,
                 warmup,
                 duration,
+                shutdown_timeout,
                 output,
                 diagnostics,
                 arguments,

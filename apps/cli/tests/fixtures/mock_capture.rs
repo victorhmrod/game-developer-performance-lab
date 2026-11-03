@@ -5,6 +5,7 @@ fn main() {
         eprintln!("PresentMon mock-1\n--process_id --output_file --timed --terminate_after_timed --session_name --no_console_stats");
         std::process::exit(1);
     }
+    if args.iter().any(|v| v == "short") { thread::sleep(Duration::from_millis(300)); return; }
     if args.iter().any(|v| v == "target") { thread::sleep(Duration::from_secs(10)); return; }
     let value = |name: &str| &args[args.iter().position(|v| v == name).unwrap() + 1];
     let pid = value("--process_id");

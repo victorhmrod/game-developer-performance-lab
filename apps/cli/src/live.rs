@@ -26,6 +26,7 @@ pub struct Options {
     pub swap_chain: Option<String>,
     pub warmup: u64,
     pub duration: u64,
+    pub shutdown_timeout: u64,
     pub output: PathBuf,
     pub diagnostics: Option<PathBuf>,
     pub arguments: Vec<String>,
@@ -66,6 +67,8 @@ struct Report {
     performance_target: &'static str,
     diagnostics_error: Option<String>,
     etw_session_name: String,
+    backend_shutdown: String,
+    etw_cleanup: &'static str,
     warnings: Vec<&'static str>,
 }
 
@@ -76,10 +79,11 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
     if options.duration == 0
         || options.duration > 3600
         || options.warmup > 3600
+        || options.shutdown_timeout > 60
         || options.swap_chain.as_ref().is_some_and(String::is_empty)
     {
         return Err(
-            "duration must be 1–3600 seconds, warmup at most 3600 seconds, and any swap chain must be nonempty"
+            "duration must be 1–3600 seconds, warmup at most 3600 seconds, shutdown timeout at most 60 seconds, and any swap chain must be nonempty"
                 .into(),
         );
     }
@@ -133,6 +137,7 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
     let session = format!("GDPL-{}-{started_unix_ms}", std::process::id());
     let mut execution = "completed".to_string();
     let mut swap_chains = Vec::new();
+    let mut backend_shutdown = "not_started".to_string();
     let result = (|| -> Result<FrameAnalysis, Box<dyn Error>> {
         let warmup_start = Instant::now();
         while warmup_start.elapsed() < Duration::from_secs(options.warmup) {
@@ -150,6 +155,7 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         if cancelled.load(Ordering::SeqCst) {
             return Err("cancelled before capture".into());
         }
+        target.verify_identity(pid)?;
         let csv = work.path().join("capture.csv");
         let mut capture = presentmon::PresentMon(backend.clone()).start(
             pid,
@@ -158,28 +164,40 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             options.duration,
             work.path(),
         )?;
-        let start = Instant::now();
-        loop {
-            if cancelled.load(Ordering::SeqCst) {
-                return Err("cancelled during capture".into());
-            }
-            if target.exited()? {
-                return Err("target exited during capture".into());
-            }
-            if let Some(status) = capture.0.try_wait()? {
-                if !status.success() {
-                    return Err(format!("PresentMon exited with {status}").into());
+        let outcome = (|| -> Result<(), Box<dyn Error>> {
+            target.verify_identity(pid)?;
+            let start = Instant::now();
+            loop {
+                if cancelled.load(Ordering::SeqCst) {
+                    return Err("cancelled during capture".into());
                 }
-                if start.elapsed() < Duration::from_secs(options.duration) {
-                    return Err("PresentMon terminated before requested capture duration".into());
+                if target.exited()? {
+                    return Err("target exited during capture".into());
                 }
-                break;
+                if let Some(status) = capture.0.try_wait()? {
+                    if !status.success() {
+                        return Err(format!("PresentMon exited with {status}").into());
+                    }
+                    if start.elapsed() < Duration::from_secs(options.duration) {
+                        return Err(
+                            "PresentMon terminated before requested capture duration".into()
+                        );
+                    }
+                    return Ok(());
+                }
+                if start.elapsed() > Duration::from_secs(options.duration + 30) {
+                    return Err("PresentMon capture timed out".into());
+                }
+                thread::sleep(Duration::from_millis(25));
             }
-            if start.elapsed() > Duration::from_secs(options.duration + 30) {
-                return Err("PresentMon capture timed out".into());
-            }
-            thread::sleep(Duration::from_millis(25));
+        })();
+        if outcome.is_err() {
+            backend_shutdown =
+                presentmon::stop(&mut capture, Duration::from_secs(options.shutdown_timeout));
+        } else {
+            backend_shutdown = "timed_exit".into();
         }
+        outcome?;
         swap_chains = gdpl_analyzer::presentmon_swap_chains(File::open(&csv)?, pid)?;
         let selected = match &options.swap_chain {
             Some(address) => address.as_str(),
@@ -261,13 +279,16 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         performance_target: "not_evaluated",
         diagnostics_error,
         etw_session_name: session,
+        backend_shutdown,
+        etw_cleanup: "unknown",
         warnings: vec![
             "Experimental backend; real PresentMon capture has not been verified",
             "Capture start and display timestamps, event loss, and coverage are not verified",
             "Warmup precedes launching PresentMon; capture startup introduces an unmeasured gap",
             "Only the selected process is targeted; launcher descendants are excluded",
             "CPU and memory metrics are unavailable for this capture",
-            "Cancellation force-terminates owned processes; attached processes and descendants are not terminated",
+            "Cancellation requests backend shutdown then may force termination; ETW cleanup is unverified",
+            "Owned targets are terminated; attached targets and descendants are not terminated",
         ],
     };
     serde_json::to_writer_pretty(&mut output, &report)?;

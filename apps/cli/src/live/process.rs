@@ -60,6 +60,16 @@ impl ProcessHandle {
     pub fn creation_time(&self) -> Option<u64> {
         Some(self.creation_time)
     }
+    pub fn verify_identity(&self, pid: u32) -> Result<(), Box<dyn Error>> {
+        if self.exited()? {
+            return Err("target exited before identity verification".into());
+        }
+        let current = Self::open(pid)?;
+        if current.creation_time != self.creation_time || current.exited()? || self.exited()? {
+            return Err("target PID identity changed or process exited".into());
+        }
+        Ok(())
+    }
 }
 #[cfg(windows)]
 impl Drop for ProcessHandle {
@@ -82,5 +92,19 @@ impl ProcessHandle {
     }
     pub fn creation_time(&self) -> Option<u64> {
         None
+    }
+    pub fn verify_identity(&self, _: u32) -> Result<(), Box<dyn Error>> {
+        Err("unsupported platform".into())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::ProcessHandle;
+    #[test]
+    fn detects_identity_mismatch() {
+        let current = ProcessHandle::open(std::process::id()).unwrap();
+        assert!(current.verify_identity(std::process::id()).is_ok());
+        assert!(current.verify_identity(0).is_err());
     }
 }

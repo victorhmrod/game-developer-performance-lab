@@ -69,6 +69,8 @@ pub struct FrameAnalysis {
     pub swap_chain: String,
     pub selected_rows: usize,
     pub unavailable_intervals: usize,
+    /// CPU frame start, not a display or presentation timestamp.
+    pub cpu_start_observation: Option<CpuStartObservation>,
     pub frame_times_ms: Vec<f64>,
     pub distribution_ms: Distribution,
     pub average_fps: f64,
@@ -81,6 +83,16 @@ pub struct FrameAnalysis {
     pub capture_coverage: Option<f64>,
     pub lost_events: Option<u64>,
     pub warnings: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CpuStartObservation {
+    pub first_ms: f64,
+    pub last_ms: f64,
+    pub span_ms: f64,
+    pub count: usize,
+    pub duplicate_count: usize,
+    pub out_of_order_count: usize,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -144,6 +156,8 @@ pub fn analyze_presentmon(
     let process_col = column("ProcessID")?;
     let swap_col = column("SwapChainAddress")?;
     let interval_col = column("MsBetweenDisplayChange")?;
+    let timestamp_col = headers.iter().position(|value| value == "CPUStartTime");
+    let mut timestamps = Vec::new();
     let mut values = Vec::new();
     let mut rows = 0;
     let mut unavailable = 0;
@@ -156,6 +170,16 @@ pub fn analyze_presentmon(
             continue;
         }
         rows += 1;
+        if let Some(index) = timestamp_col {
+            let timestamp: f64 = record[index]
+                .trim()
+                .parse()
+                .map_err(|_| "invalid CPUStartTime")?;
+            if !timestamp.is_finite() || timestamp < 0.0 {
+                return Err("CPUStartTime must be finite and nonnegative".into());
+            }
+            timestamps.push(timestamp);
+        }
         let value = record[interval_col].trim();
         if value.is_empty() || value.eq_ignore_ascii_case("NA") {
             unavailable += 1;
@@ -185,6 +209,18 @@ pub fn analyze_presentmon(
         swap_chain: swap_chain.into(),
         selected_rows: rows,
         unavailable_intervals: unavailable,
+        cpu_start_observation: if timestamps.is_empty() {
+            None
+        } else {
+            Some(CpuStartObservation {
+                first_ms: timestamps[0],
+                last_ms: *timestamps.last().unwrap(),
+                span_ms: timestamps.last().unwrap() - timestamps[0],
+                count: timestamps.len(),
+                duplicate_count: timestamps.windows(2).filter(|w| w[1] == w[0]).count(),
+                out_of_order_count: timestamps.windows(2).filter(|w| w[1] < w[0]).count(),
+            })
+        },
         average_fps: 1000.0 / distribution.mean,
         median_fps: 1000.0 / distribution.median,
         one_percent_low_fps: (sorted.len() >= 100).then(|| tail_fps(sorted.len().div_ceil(100))),
@@ -201,6 +237,7 @@ pub fn analyze_presentmon(
             "CSV alone does not establish capture coverage or ETW event loss",
             "Unavailable intervals are not necessarily dropped frames",
             "Displayed intervals are not simulation or Present() intervals",
+            "CPUStartTime describes CPU frame starts, not displayed-frame timestamps; capture window mapping is unknown",
             "Capture provenance and process identity must be verified independently",
         ],
     })
@@ -295,6 +332,18 @@ mod tests {
                 },
             ]
         );
+    }
+    #[test]
+    fn cpu_timestamp_diagnostics_do_not_imply_window_integrity() {
+        let csv = b"ProcessID,SwapChainAddress,MsBetweenDisplayChange,CPUStartTime\n1,a,10,10\n1,a,20,10\n1,a,20,9\n";
+        let analysis = analyze_presentmon(&csv[..], 1, "a", 50.).unwrap();
+        let observation = analysis.cpu_start_observation.unwrap();
+        assert_eq!(observation.duplicate_count, 1);
+        assert_eq!(observation.out_of_order_count, 1);
+        assert!(analysis.capture_coverage.is_none());
+        let invalid =
+            b"ProcessID,SwapChainAddress,MsBetweenDisplayChange,CPUStartTime\n1,a,10,NaN\n";
+        assert!(analyze_presentmon(&invalid[..], 1, "a", 50.).is_err());
     }
     #[test]
     fn low_fps_uses_slowest_frame_tail() {

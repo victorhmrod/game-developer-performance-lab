@@ -241,3 +241,44 @@ fn attaches_to_unique_process_name() {
     target.kill().unwrap();
     target.wait().unwrap();
 }
+
+#[test]
+fn target_exit_during_capture_forces_backend_shutdown_when_timeout_is_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = fixture(temp.path());
+    let output = temp.path().join("interrupted.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_gdpl"))
+        .args(["benchmark", "live", "--exe"])
+        .arg(&mock)
+        .arg("--presentmon")
+        .arg(&mock)
+        .args([
+            "--warmup",
+            "0",
+            "--duration",
+            "5",
+            "--shutdown-timeout",
+            "0",
+            "--output",
+        ])
+        .arg(&output)
+        .args(["--", "short"])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(report["execution"], "failed");
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("target exited during capture")
+    );
+    assert!(
+        report["backend_shutdown"]
+            .as_str()
+            .unwrap()
+            .contains("forced termination")
+    );
+    assert_eq!(report["etw_cleanup"], "unknown");
+}

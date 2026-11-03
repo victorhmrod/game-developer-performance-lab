@@ -1,3 +1,5 @@
+mod live;
+
 use clap::{Parser, Subcommand};
 use gdpl_core::{BenchmarkResult, SCHEMA_VERSION, Sample};
 use std::{
@@ -59,6 +61,25 @@ enum HardwareCommand {
 }
 #[derive(Subcommand)]
 enum BenchmarkCommand {
+    /// Run an experimental supervised PresentMon capture (Windows only).
+    Live {
+        #[arg(long)]
+        exe: PathBuf,
+        #[arg(long)]
+        presentmon: Option<PathBuf>,
+        #[arg(long)]
+        swap_chain: String,
+        #[arg(long, default_value_t = 10)]
+        warmup: u64,
+        #[arg(long, default_value_t = 60)]
+        duration: u64,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        diagnostics: Option<PathBuf>,
+        #[arg(last = true)]
+        arguments: Vec<String>,
+    },
     Run {
         #[arg(long)]
         executable: PathBuf,
@@ -104,7 +125,7 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&analysis)?);
         }
         Commands::Doctor => println!(
-            "External process sampling: available; frame capture and engine adapters: unavailable. Use hardware inspect for detected host data."
+            "External process sampling: available; experimental PresentMon capture requires a compatible Windows installation; engine adapters: unavailable. Use hardware inspect for detected host data."
         ),
         Commands::Hardware {
             command: HardwareCommand::Inspect,
@@ -112,6 +133,30 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             "{}",
             serde_json::to_string_pretty(&gdpl_hardware::inspect())?
         ),
+        Commands::Benchmark {
+            command:
+                BenchmarkCommand::Live {
+                    exe,
+                    presentmon,
+                    swap_chain,
+                    warmup,
+                    duration,
+                    output,
+                    diagnostics,
+                    arguments,
+                },
+        } => {
+            return live::run(live::Options {
+                exe,
+                presentmon,
+                swap_chain,
+                warmup,
+                duration,
+                output,
+                diagnostics,
+                arguments,
+            });
+        }
         Commands::Benchmark {
             command:
                 BenchmarkCommand::Run {
@@ -164,14 +209,14 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
                 }
                 if elapsed >= next_sample {
                     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-                    if elapsed >= Duration::from_millis(warmup_ms) {
-                        if let Some(process) = system.process(pid) {
-                            samples.push(Sample {
-                                elapsed_ms: (elapsed.as_millis() as u64).saturating_sub(warmup_ms),
-                                process_cpu_percent: process.cpu_usage(),
-                                process_memory_bytes: process.memory(),
-                            });
-                        }
+                    if elapsed >= Duration::from_millis(warmup_ms)
+                        && let Some(process) = system.process(pid)
+                    {
+                        samples.push(Sample {
+                            elapsed_ms: (elapsed.as_millis() as u64).saturating_sub(warmup_ms),
+                            process_cpu_percent: process.cpu_usage(),
+                            process_memory_bytes: process.memory(),
+                        });
                     }
                     next_sample = elapsed + Duration::from_millis(interval_ms);
                 }

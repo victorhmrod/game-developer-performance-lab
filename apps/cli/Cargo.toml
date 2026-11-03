@@ -11,3 +11,5 @@ serde_json.workspace = true
 sysinfo.workspace = true
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
+tempfile = "3"
+serde = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "gdpl-hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+gdpl-core = { path = "../gdpl-core" }
+sysinfo.workspace = true

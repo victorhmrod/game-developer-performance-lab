@@ -1,0 +1,13 @@
+[package]
+name = "gdpl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+gdpl-analyzer = { path = "../../crates/gdpl-analyzer" }
+gdpl-core = { path = "../../crates/gdpl-core" }
+gdpl-hardware = { path = "../../crates/gdpl-hardware" }
+serde_json.workspace = true
+sysinfo.workspace = true
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"

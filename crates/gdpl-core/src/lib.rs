@@ -46,3 +46,74 @@ pub struct AdapterDescription {
     pub adapter_version: String,
     pub capabilities: Vec<String>,
 }
+
+/// A bounded stress plan; workload semantics are defined by the scenario provider.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StressScenario {
+    pub id: String,
+    pub parameters: std::collections::BTreeMap<String, String>,
+    pub initial_load: u64,
+    pub load_increment: u64,
+    pub maximum_load: u64,
+    pub measurement_seconds: u64,
+    pub maximum_duration_seconds: u64,
+    pub maximum_memory_bytes: u64,
+    pub minimum_fps: Option<f64>,
+}
+
+impl StressScenario {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.id.trim().is_empty() {
+            return Err("scenario id is required");
+        }
+        if self.load_increment == 0 || self.initial_load > self.maximum_load {
+            return Err("invalid load range");
+        }
+        if self.measurement_seconds == 0
+            || self.maximum_duration_seconds < self.measurement_seconds
+            || self.maximum_memory_bytes == 0
+        {
+            return Err("invalid duration or memory limit");
+        }
+        if self.minimum_fps.is_some_and(|v| !v.is_finite() || v <= 0.0) {
+            return Err("minimum FPS must be finite and positive");
+        }
+        Ok(())
+    }
+}
+
+/// Providers must stop the workload and release resources when cleanup is invoked.
+pub trait StressScenarioProvider {
+    type Error;
+    fn initialize(&mut self, scenario: &StressScenario) -> Result<(), Self::Error>;
+    fn set_load(&mut self, load: u64) -> Result<(), Self::Error>;
+    fn cleanup(&mut self) -> Result<(), Self::Error>;
+}
+
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+    #[test]
+    fn bounded_scenario_validation() {
+        let mut s = StressScenario {
+            id: "example".into(),
+            parameters: Default::default(),
+            initial_load: 1,
+            load_increment: 1,
+            maximum_load: 10,
+            measurement_seconds: 1,
+            maximum_duration_seconds: 10,
+            maximum_memory_bytes: 1024,
+            minimum_fps: None,
+        };
+        assert!(s.validate().is_ok());
+        s.load_increment = 0;
+        assert!(s.validate().is_err());
+        s.load_increment = 1;
+        s.minimum_fps = Some(f64::NAN);
+        assert!(s.validate().is_err());
+        s.minimum_fps = None;
+        s.maximum_memory_bytes = 0;
+        assert!(s.validate().is_err());
+    }
+}

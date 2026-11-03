@@ -140,3 +140,104 @@ fn unsupported_backend_is_rejected_before_target_launch() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("does not advertise"));
     assert!(!output.exists());
 }
+
+#[test]
+fn attaches_to_pid_without_terminating_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = fixture(temp.path());
+    let mut target = Command::new(&mock).arg("target").spawn().unwrap();
+    let output = temp.path().join("attach.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_gdpl"))
+        .args([
+            "benchmark",
+            "live",
+            "--pid",
+            &target.id().to_string(),
+            "--presentmon",
+        ])
+        .arg(&mock)
+        .args(["--warmup", "0", "--duration", "1", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(report["target_owned"], false);
+    assert_eq!(report["target_pid"], target.id());
+    assert!(report["target_creation_time_100ns"].as_u64().unwrap() > 0);
+    assert!(target.try_wait().unwrap().is_none());
+    target.kill().unwrap();
+    target.wait().unwrap();
+}
+
+#[test]
+fn rejects_ambiguous_process_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = fixture(temp.path());
+    let mut one = Command::new(&mock).arg("target").spawn().unwrap();
+    let mut two = Command::new(&mock).arg("target").spawn().unwrap();
+    let output = temp.path().join("ambiguous.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_gdpl"))
+        .args([
+            "benchmark",
+            "live",
+            "--process-name",
+            mock.file_name().unwrap().to_str().unwrap(),
+            "--presentmon",
+        ])
+        .arg(&mock)
+        .args(["--warmup", "0", "--duration", "1", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("process name matched"));
+    assert!(one.try_wait().unwrap().is_none());
+    assert!(two.try_wait().unwrap().is_none());
+    one.kill().unwrap();
+    one.wait().unwrap();
+    two.kill().unwrap();
+    two.wait().unwrap();
+}
+
+#[test]
+fn attaches_to_unique_process_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let mock = fixture(temp.path());
+    let target_exe = temp
+        .path()
+        .join(format!("gdpl-target-{}.exe", std::process::id()));
+    fs::copy(&mock, &target_exe).unwrap();
+    let mut target = Command::new(&target_exe).arg("target").spawn().unwrap();
+    let output = temp.path().join("name.json");
+    let result = Command::new(env!("CARGO_BIN_EXE_gdpl"))
+        .args([
+            "benchmark",
+            "live",
+            "--process-name",
+            target_exe.file_name().unwrap().to_str().unwrap(),
+            "--presentmon",
+        ])
+        .arg(&mock)
+        .args(["--warmup", "0", "--duration", "1", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(report["target_pid"], target.id());
+    assert_eq!(report["target_owned"], false);
+    assert!(target.try_wait().unwrap().is_none());
+    target.kill().unwrap();
+    target.wait().unwrap();
+}

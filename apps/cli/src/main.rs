@@ -63,8 +63,12 @@ enum HardwareCommand {
 enum BenchmarkCommand {
     /// Run an experimental supervised PresentMon capture (Windows only).
     Live {
-        #[arg(long)]
-        exe: PathBuf,
+        #[arg(long, required_unless_present_any = ["pid", "process_name"], conflicts_with_all = ["pid", "process_name"])]
+        exe: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["exe", "process_name"])]
+        pid: Option<u32>,
+        #[arg(long, conflicts_with_all = ["exe", "pid"])]
+        process_name: Option<String>,
         #[arg(long)]
         presentmon: Option<PathBuf>,
         #[arg(long)]
@@ -137,6 +141,8 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             command:
                 BenchmarkCommand::Live {
                     exe,
+                    pid,
+                    process_name,
                     presentmon,
                     swap_chain,
                     warmup,
@@ -148,6 +154,8 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         } => {
             return live::run(live::Options {
                 exe,
+                pid,
+                process_name,
                 presentmon,
                 swap_chain,
                 warmup,

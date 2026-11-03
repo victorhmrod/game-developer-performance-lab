@@ -1,10 +1,14 @@
+mod presentmon;
+mod process;
+
 use gdpl_analyzer::{FrameAnalysis, SwapChainActivity};
+use presentmon::FrameCaptureBackend;
 use serde::Serialize;
 use std::{
     error::Error,
     fs::{self, File, OpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -15,7 +19,9 @@ use std::{
 };
 
 pub struct Options {
-    pub exe: PathBuf,
+    pub exe: Option<PathBuf>,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
     pub presentmon: Option<PathBuf>,
     pub swap_chain: Option<String>,
     pub warmup: u64,
@@ -43,6 +49,8 @@ struct Report {
     target_executable: String,
     target_arguments: Vec<String>,
     target_pid: u32,
+    target_owned: bool,
+    target_creation_time_100ns: Option<u64>,
     warmup_seconds: u64,
     requested_capture_seconds: u64,
     started_unix_ms: u128,
@@ -61,72 +69,6 @@ struct Report {
     warnings: Vec<&'static str>,
 }
 
-fn find_backend(explicit: Option<&Path>) -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(path) = explicit {
-        let path = fs::canonicalize(path)?;
-        if !path.is_file() {
-            return Err("PresentMon path is not a file".into());
-        }
-        return Ok(path);
-    }
-    let paths = std::env::var_os("PATH").ok_or("PATH is unavailable; specify --presentmon")?;
-    for dir in std::env::split_paths(&paths) {
-        let candidate = dir.join(if cfg!(windows) {
-            "PresentMon.exe"
-        } else {
-            "PresentMon"
-        });
-        if candidate.is_file() {
-            return Ok(fs::canonicalize(candidate)?);
-        }
-    }
-    Err("PresentMon not found on PATH; specify --presentmon".into())
-}
-
-// Inspect help before using the documented console switches. Never wait indefinitely.
-fn probe(path: &Path, directory: &Path) -> Result<Option<String>, Box<dyn Error>> {
-    let help_path = directory.join("help.txt");
-    let mut child = OwnedChild(
-        Command::new(path)
-            .arg("--help")
-            .stdin(Stdio::null())
-            .stdout(File::create(&help_path)?)
-            .stderr(File::create(directory.join("help-stderr.txt"))?)
-            .spawn()?,
-    );
-    let start = Instant::now();
-    loop {
-        if child.0.try_wait()?.is_some() {
-            break;
-        }
-        if start.elapsed() > Duration::from_secs(5) {
-            return Err("PresentMon --help timed out".into());
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    let help = format!(
-        "{}\n{}",
-        fs::read_to_string(help_path)?,
-        fs::read_to_string(directory.join("help-stderr.txt"))?
-    );
-    for option in [
-        "--process_id",
-        "--output_file",
-        "--timed",
-        "--terminate_after_timed",
-        "--session_name",
-        "--no_console_stats",
-    ] {
-        if !help.contains(option) {
-            return Err(format!("PresentMon help does not advertise {option}").into());
-        }
-    }
-    Ok(help
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("PresentMon "))
-        .map(str::to_owned))
-}
-
 pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
     if !cfg!(windows) {
         return Err("live PresentMon capture is only available on Windows".into());
@@ -141,10 +83,13 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
                 .into(),
         );
     }
-    let exe = fs::canonicalize(&options.exe)?;
-    let backend = find_backend(options.presentmon.as_deref())?;
+    if options.exe.is_none() && !options.arguments.is_empty() {
+        return Err("arguments after -- are only valid with --exe".into());
+    }
+    let exe = options.exe.as_ref().map(fs::canonicalize).transpose()?;
+    let backend = presentmon::find_backend(options.presentmon.as_deref())?;
     let work = tempfile::tempdir()?;
-    let backend_version = probe(&backend, work.path())?;
+    let backend_version = presentmon::probe(&backend, work.path())?;
     // Reserve the result path before launching anything; never overwrite previous evidence.
     let mut output = OpenOptions::new()
         .write(true)
@@ -154,13 +99,37 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
     let flag = cancelled.clone();
     ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
     let started_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-    let mut target = OwnedChild(
-        Command::new(&exe)
-            .args(&options.arguments)
-            .stdin(Stdio::null())
-            .spawn()?,
-    );
-    let pid = target.0.id();
+    let mut owned = match &exe {
+        Some(exe) => Some(OwnedChild(
+            Command::new(exe)
+                .args(&options.arguments)
+                .stdin(Stdio::null())
+                .spawn()?,
+        )),
+        None => None,
+    };
+    let pid = if let Some(child) = &owned {
+        child.0.id()
+    } else if let Some(pid) = options.pid {
+        pid
+    } else {
+        let name = options.process_name.as_deref().ok_or("target required")?;
+        let system = sysinfo::System::new_all();
+        let matches: Vec<_> = system
+            .processes()
+            .values()
+            .filter(|p| p.name().to_string_lossy().eq_ignore_ascii_case(name))
+            .collect();
+        if matches.len() != 1 {
+            return Err(format!(
+                "process name matched {} processes; provide --pid",
+                matches.len()
+            )
+            .into());
+        }
+        matches[0].pid().as_u32()
+    };
+    let target = process::ProcessHandle::open(pid)?;
     let session = format!("GDPL-{}-{started_unix_ms}", std::process::id());
     let mut execution = "completed".to_string();
     let mut swap_chains = Vec::new();
@@ -170,42 +139,31 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             if cancelled.load(Ordering::SeqCst) {
                 return Err("cancelled during warmup".into());
             }
-            if target.0.try_wait()?.is_some() {
+            if target.exited()? {
                 return Err("target exited during warmup".into());
             }
             thread::sleep(Duration::from_millis(25));
         }
-        if target.0.try_wait()?.is_some() {
+        if target.exited()? {
             return Err("target exited before capture".into());
         }
         if cancelled.load(Ordering::SeqCst) {
             return Err("cancelled before capture".into());
         }
         let csv = work.path().join("capture.csv");
-        let log = File::create(work.path().join("presentmon.log"))?;
-        let mut capture = OwnedChild(
-            Command::new(&backend)
-                .args(["--process_id", &pid.to_string(), "--output_file"])
-                .arg(&csv)
-                .args([
-                    "--timed",
-                    &options.duration.to_string(),
-                    "--terminate_after_timed",
-                    "--session_name",
-                    &session,
-                    "--no_console_stats",
-                ])
-                .stdin(Stdio::null())
-                .stdout(log.try_clone()?)
-                .stderr(log)
-                .spawn()?,
-        );
+        let mut capture = presentmon::PresentMon(backend.clone()).start(
+            pid,
+            &csv,
+            &session,
+            options.duration,
+            work.path(),
+        )?;
         let start = Instant::now();
         loop {
             if cancelled.load(Ordering::SeqCst) {
                 return Err("cancelled during capture".into());
             }
-            if target.0.try_wait()?.is_some() {
+            if target.exited()? {
                 return Err("target exited during capture".into());
             }
             if let Some(status) = capture.0.try_wait()? {
@@ -235,7 +193,9 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         };
         gdpl_analyzer::analyze_presentmon(File::open(csv)?, pid, selected, 50.)
     })();
+    let target_creation_time_100ns = target.creation_time();
     drop(target);
+    drop(owned.take());
     let (analysis, error) = match result {
         Ok(analysis) => (Some(analysis), None),
         Err(error) => {
@@ -278,9 +238,14 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
         backend: "PresentMon console",
         backend_path: backend.display().to_string(),
         backend_version,
-        target_executable: exe.display().to_string(),
+        target_executable: exe
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         target_arguments: options.arguments,
         target_pid: pid,
+        target_owned: exe.is_some(),
+        target_creation_time_100ns,
         warmup_seconds: options.warmup,
         requested_capture_seconds: options.duration,
         started_unix_ms,
@@ -300,9 +265,9 @@ pub fn run(options: Options) -> Result<bool, Box<dyn Error>> {
             "Experimental backend; real PresentMon capture has not been verified",
             "Capture start and display timestamps, event loss, and coverage are not verified",
             "Warmup precedes launching PresentMon; capture startup introduces an unmeasured gap",
-            "Only the launched process is targeted; launcher descendants are excluded",
+            "Only the selected process is targeted; launcher descendants are excluded",
             "CPU and memory metrics are unavailable for this capture",
-            "Cancellation force-terminates owned processes; descendants are not terminated",
+            "Cancellation force-terminates owned processes; attached processes and descendants are not terminated",
         ],
     };
     serde_json::to_writer_pretty(&mut output, &report)?;
@@ -322,7 +287,7 @@ mod tests {
     #[test]
     fn rejects_missing_backend_and_directory() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(find_backend(Some(&temp.path().join("missing"))).is_err());
-        assert!(find_backend(Some(temp.path())).is_err());
+        assert!(presentmon::find_backend(Some(&temp.path().join("missing"))).is_err());
+        assert!(presentmon::find_backend(Some(temp.path())).is_err());
     }
 }

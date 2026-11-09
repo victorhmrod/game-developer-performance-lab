@@ -48,11 +48,14 @@ pub struct External {
     responses: Option<Receiver<Result<String, String>>>,
     pid: Option<u32>,
     sequence: u64,
+    state: gdpl_adapter_sdk::State,
     controlled: bool,
     supports_reset: bool,
     supports_metrics: bool,
     metric_metadata: Option<std::collections::BTreeMap<String, String>>,
     provider_info: Option<std::collections::BTreeMap<String, String>>,
+    metric_definitions:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>>,
     timeout: Duration,
 }
 
@@ -66,17 +69,28 @@ impl External {
             responses: None,
             pid: None,
             sequence: 0,
+            state: gdpl_adapter_sdk::State::Connected,
             controlled: false,
             supports_reset: false,
             supports_metrics: false,
             metric_metadata: None,
             provider_info: None,
+            metric_definitions: None,
             timeout: Duration::from_secs(2),
         }
     }
     fn request(&mut self, command: &str, value: Value) -> Result<Value, String> {
+        let next_state = self
+            .state
+            .transition(command)
+            .map_err(|error| format!("invalid protocol transition: {error:?}"))?;
         self.sequence += 1;
-        let request = json!({"version": 1, "id": self.sequence, "command": command, "data": value});
+        let request = gdpl_adapter_sdk::Request {
+            version: gdpl_adapter_sdk::PROTOCOL_VERSION,
+            id: self.sequence,
+            command: command.into(),
+            data: value,
+        };
         let mut line = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
         if line.len() > 8191 {
             return Err("protocol request exceeds 8192 bytes".into());
@@ -111,6 +125,7 @@ impl External {
                 response["error"]
             ));
         }
+        self.state = next_state;
         Ok(response)
     }
 }
@@ -265,6 +280,34 @@ impl StressScenarioProvider for External {
             }
             self.metric_metadata = Some(descriptions);
         }
+        if let Some(definitions) = hello.get("metric_definitions") {
+            let values: std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition> =
+                serde_json::from_value(definitions.clone())
+                    .map_err(|e| format!("invalid metric definitions: {e}"))?;
+            if values.len() > 64
+                || values.iter().any(|(id, metric)| {
+                    id.is_empty()
+                        || id.len() > 128
+                        || metric.name.is_empty()
+                        || metric.unit.is_empty()
+                        || metric.source.is_empty()
+                        || metric.sampling_method.is_empty()
+                        || metric.data_type != "number"
+                })
+            {
+                return Err("invalid metric definitions".into());
+            }
+            self.metric_definitions = Some(values);
+        }
+        if capabilities.iter().any(|value| value == "list_scenarios") {
+            let scenarios = self.request("list_scenarios", json!({}))?;
+            if !scenarios["scenarios"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["id"] == scenario.id))
+            {
+                return Err("requested scenario is not supported by provider".into());
+            }
+        }
         self.request("initialize", json!({"scenario": scenario.id, "parameters": scenario.parameters, "maximum_load": scenario.maximum_load}))?;
         Ok(())
     }
@@ -280,6 +323,11 @@ impl StressScenarioProvider for External {
     fn metric_metadata(&self) -> Option<std::collections::BTreeMap<String, String>> {
         self.metric_metadata.clone()
     }
+    fn metric_definitions(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
+        self.metric_definitions.clone()
+    }
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
         if !self.supports_metrics {
             return Ok(None);
@@ -293,6 +341,12 @@ impl StressScenarioProvider for External {
         }
         let mut result = std::collections::BTreeMap::new();
         for (key, value) in values {
+            if let Some(definitions) = &self.metric_definitions {
+                let definition = definitions.get(key).ok_or("unregistered provider metric")?;
+                if definition.availability == gdpl_adapter_sdk::Availability::Unavailable {
+                    return Err("provider emitted unavailable metric".into());
+                }
+            }
             let number = value
                 .as_f64()
                 .filter(|n| n.is_finite())

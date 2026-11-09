@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
+gdpl-adapter-sdk = { path = "../gdpl-adapter-sdk" }
 gdpl-core = { path = "../gdpl-core" }
 serde.workspace = true
 sysinfo.workspace = true

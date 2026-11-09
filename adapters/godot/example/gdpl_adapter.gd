@@ -26,6 +26,7 @@ var gate := Semaphore.new()
 var state_lock := Mutex.new()
 var stopping := false
 var initialized := false
+var negotiated := false
 var workload_kind := ""
 var maximum_load := 0
 var workload_root: Node3D
@@ -93,18 +94,32 @@ func _on_request(line: String) -> void:
     if request.get("version") != 1 or not data is Dictionary:
         reply["ok"] = false
         reply["error"] = "unsupported protocol version or data"
+    elif request.get("command", "") != "hello" and request.get("command", "") != "shutdown" and not negotiated:
+        reply["ok"] = false
+        reply["error"] = "handshake required"
+        reply["error_code"] = "invalid_state"
     else:
         match request.get("command", ""):
             "hello":
-                reply["capabilities"] = ["set_load", "reset", "metrics", "shutdown"]
-                reply["scenarios"] = LIMITS.keys()
-                reply["metric_metadata"] = METADATA
-                reply["provider_info"] = {"engine": "Godot", "process_id": str(OS.get_process_id()), "engine_version": str(Engine.get_version_info().get("string", "unknown")), "adapter_version": "0.1.0", "display_backend": DisplayServer.get_name(), "video_adapter": RenderingServer.get_video_adapter_name(), "video_vendor": RenderingServer.get_video_adapter_vendor(), "graphics_api": RenderingServer.get_video_adapter_api_version()}
+                if negotiated or not data.get("versions", []) is Array or not data.get("versions", []).has(1.0):
+                    reply["ok"] = false
+                    reply["error"] = "unsupported version or handshake already completed"
+                    reply["error_code"] = "negotiation_failed"
+                else:
+                    negotiated = true
+                    reply["capabilities"] = ["set_load", "reset", "metrics", "shutdown", "list_scenarios"]
+                    reply["scenarios"] = LIMITS.keys()
+                    reply["metric_metadata"] = METADATA
+                    reply["metric_definitions"] = _metric_definitions()
+                    reply["provider_info"] = {"name": "GDPL Godot example", "platform": OS.get_name(), "engine": "Godot", "process_id": str(OS.get_process_id()), "engine_version": str(Engine.get_version_info().get("string", "unknown")), "adapter_version": "0.1.0", "display_backend": DisplayServer.get_name(), "video_adapter": RenderingServer.get_video_adapter_name(), "video_vendor": RenderingServer.get_video_adapter_vendor(), "graphics_api": RenderingServer.get_video_adapter_api_version()}
+            "list_scenarios":
+                reply["scenarios"] = [{"id": "external_process", "workloads": LIMITS}]
             "initialize":
                 var params = data.get("parameters", {})
-                if not params is Dictionary:
+                if initialized or data.get("scenario") != "external_process" or not params is Dictionary or params.keys().any(func(key): return key != "workload"):
                     reply["ok"] = false
-                    reply["error"] = "parameters must be an object"
+                    reply["error"] = "invalid state, scenario or parameters"
+                    reply["error_code"] = "invalid_scenario"
                 else:
                     var kind := str(params.get("workload", "nodes"))
                     var ceiling := int(data.get("maximum_load", -1))
@@ -116,7 +131,12 @@ func _on_request(line: String) -> void:
                         maximum_load = ceiling
                         initialized = true
             "reset":
-                _clear_workload()
+                if not initialized:
+                    reply["ok"] = false
+                    reply["error"] = "scenario not initialized"
+                    reply["error_code"] = "invalid_state"
+                else:
+                    _clear_workload()
             "set_load":
                 var load := int(data.get("load", -1))
                 if not initialized or load < 0 or load > maximum_load:
@@ -153,6 +173,13 @@ func _on_request(line: String) -> void:
     if stopping:
         reader.wait_to_finish()
         get_tree().quit()
+
+func _metric_definitions() -> Dictionary:
+    var units := {"godot_clock_us": "microseconds", "godot_process_interval_ms": "milliseconds", "godot_fps": "frames/second", "godot_process_ms": "milliseconds", "godot_physics_ms": "milliseconds", "godot_node_count": "nodes", "godot_workload_count": "objects", "godot_processing_nodes": "nodes", "godot_physics_active": "bodies", "godot_physics_pairs": "pairs", "godot_animation_playing": "players", "godot_animation_position_sum_s": "seconds", "godot_render_draw_calls": "draw_calls", "godot_render_objects": "objects", "godot_render_primitives": "primitives"}
+    var result := {}
+    for id in METADATA:
+        result[id] = {"name": id, "unit": units[id], "data_type": "number", "source": "godot_adapter", "sampling_method": "polled snapshot", "timestamp_domain": "unavailable", "availability": "conditional", "diagnostic": METADATA[id]}
+    return result
 
 func _reply(message: Dictionary) -> void:
     # --no-header keeps startup output off the protocol stream. Do not use --quiet.

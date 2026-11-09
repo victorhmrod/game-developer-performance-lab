@@ -123,6 +123,9 @@ pub struct Report {
     pub scenario_kind: String,
     pub provider_info: Option<std::collections::BTreeMap<String, String>>,
     pub provider_metric_metadata: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_metric_definitions:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>>,
     pub stages: Vec<Stage>,
     pub termination: String,
     pub diagnostic: Option<String>,
@@ -228,6 +231,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
     let mut target_start_time = None;
     let mut target_creation_time = None;
     let mut provider_metric_metadata = None;
+    let mut provider_metric_definitions = None;
     let mut provider_info = None;
     let mut maximum_completed_load = None;
     let mut peak_memory: Option<u64> = None;
@@ -244,6 +248,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
             .map_err(|e| format!("initialization failed: {e}"))?;
         provider_info = provider.provider_info();
         provider_metric_metadata = provider.metric_metadata();
+        provider_metric_definitions = provider.metric_definitions();
         target_pid = Some(provider.target_pid().unwrap_or(std::process::id()));
         let target_id = target_pid.unwrap();
         let identity = process::Identity::open(target_id)
@@ -532,6 +537,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
         scenario_kind,
         provider_info,
         provider_metric_metadata,
+        provider_metric_definitions,
         stages,
         termination,
         diagnostic,
@@ -549,6 +555,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
             "Resource monitoring samples the selected process only; descendants and GPU are excluded",
             "Memory limit is sampled and can be exceeded between samples",
             "Provider metrics and their polled summaries are unverified claims; polling does not capture every frame",
+            "Host, engine, OS and graphics capture clocks are not synchronized; cross-source correlation is unavailable",
             "FPS/frame-time threshold evaluation and independent display timing are unavailable",
             "Completed loads are not validated hardware requirements",
             "CPU is percent of one logical core; first observation unavailable",

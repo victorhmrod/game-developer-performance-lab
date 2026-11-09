@@ -95,3 +95,82 @@ fn godot_headless_end_to_end() {
         fs::remove_file(&output).unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires a Godot engine executable in GDPL_GODOT"]
+fn godot_protocol_conformance() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    let engine = std::env::var("GDPL_GODOT").unwrap();
+    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/godot/example")
+        .canonicalize()
+        .unwrap();
+    let mut child = Command::new(engine)
+        .args(["--no-header", "--headless", "--path"])
+        .arg(project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut id = 0;
+    let mut request = |version: u32, command: &str, data: serde_json::Value| {
+        id += 1;
+        writeln!(
+            input,
+            "{}",
+            json!({"version": version, "id": id, "command": command, "data": data})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"].as_f64(), Some(id as f64));
+        response
+    };
+    assert_eq!(request(2, "hello", json!({"versions":[2]}))["ok"], false);
+    assert_eq!(
+        request(1, "set_load", json!({"load":1}))["error_code"],
+        "invalid_state"
+    );
+    assert_eq!(request(1, "hello", json!({"versions":[2]}))["ok"], false);
+    let hello = request(1, "hello", json!({"versions":[1]}));
+    assert_eq!(hello["ok"], true);
+    assert_eq!(
+        hello["metric_definitions"]["godot_fps"]["unit"],
+        "frames/second"
+    );
+    assert_eq!(
+        hello["metric_definitions"]["godot_fps"]["timestamp_domain"],
+        "unavailable"
+    );
+    assert_eq!(
+        request(1, "list_scenarios", json!({}))["scenarios"][0]["id"],
+        "external_process"
+    );
+    assert_eq!(request(1, "metrics", json!({}))["ok"], false);
+    assert_eq!(
+        request(
+            1,
+            "initialize",
+            json!({"scenario":"external_process","parameters":{"workload":"nodes"},"maximum_load":4})
+        )["ok"],
+        true
+    );
+    let ready = request(1, "set_load", json!({"load":4}));
+    assert_eq!(ready["observed_load"].as_f64(), Some(4.0));
+    assert_eq!(
+        request(1, "metrics", json!({}))["metrics"]["godot_workload_count"].as_f64(),
+        Some(4.0)
+    );
+    assert_eq!(request(1, "reset", json!({}))["ok"], true);
+    assert_eq!(
+        request(1, "metrics", json!({}))["metrics"]["godot_workload_count"].as_f64(),
+        Some(0.0)
+    );
+    assert_eq!(request(1, "shutdown", json!({}))["ok"], true);
+    assert!(child.wait().unwrap().success());
+}

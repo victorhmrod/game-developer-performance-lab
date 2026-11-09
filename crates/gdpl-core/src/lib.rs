@@ -107,6 +107,12 @@ pub trait StressScenarioProvider {
     fn metric_metadata(&self) -> Option<std::collections::BTreeMap<String, String>> {
         None
     }
+    /// Structured metric definitions supplied by the provider, when supported.
+    fn metric_definitions(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
+        None
+    }
     /// Provider-reported values have no implicit unit or trust guarantee.
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, Self::Error> {
         Ok(None)

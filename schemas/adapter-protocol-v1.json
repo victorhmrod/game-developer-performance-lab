@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gdpl.local/schemas/adapter-protocol-v1.json",
+  "title": "GDPL adapter protocol v1 envelopes",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "version",
+        "id",
+        "command",
+        "data"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "version",
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "error_code": {
+          "type": "string"
+        },
+        "metric_definitions": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {
+            "$ref": "#/$defs/metric_definition"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "metric_definition": {
+      "type": "object",
+      "required": [
+        "name",
+        "unit",
+        "data_type",
+        "source",
+        "sampling_method",
+        "timestamp_domain",
+        "availability",
+        "diagnostic"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data_type": {
+          "const": "number"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sampling_method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timestamp_domain": {
+          "enum": [
+            "host_monotonic",
+            "engine_monotonic",
+            "external_capture",
+            "os_telemetry",
+            "unavailable"
+          ]
+        },
+        "availability": {
+          "enum": [
+            "available",
+            "conditional",
+            "unavailable"
+          ]
+        },
+        "diagnostic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

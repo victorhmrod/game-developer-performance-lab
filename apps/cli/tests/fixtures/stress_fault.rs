@@ -17,11 +17,14 @@ fn main() {
             continue;
         }
         if line.contains("\"hello\"") {
-            if mode == "bad_pid" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"],\"provider_info\":{{\"process_id\":\"0\"}}}}").unwrap(); }
+            if mode == "missing_capability" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[]}}").unwrap(); }
+            else if mode == "missing_scenario" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\",\"list_scenarios\"]}}").unwrap(); }
+            else if mode == "bad_pid" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"],\"provider_info\":{{\"process_id\":\"0\"}}}}").unwrap(); }
             else if mode == "bad_metadata" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"],\"metric_metadata\":{{\"fps\":42}}}}").unwrap(); }
             else if mode == "invalid_metric" || mode == "missing_metric" {
                 writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\",\"metrics\"],\"metric_metadata\":{{\"frame_ms\":\"milliseconds; test provider\"}}}}").unwrap();
             } else { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"]}}").unwrap(); }
+        } else if line.contains("\"list_scenarios\"") { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"scenarios\":[]}}").unwrap();
         } else if line.contains("\"set_load\"") {
             if mode == "bad_observed" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"ready\":true,\"load\":1,\"observed_load\":0}}").unwrap(); }
             else if mode == "bad_ack" { writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"ready\":false}}").unwrap(); }

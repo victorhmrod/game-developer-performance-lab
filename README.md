@@ -107,3 +107,14 @@ cargo test -p gdpl --test godot --locked -- --ignored
 ```
 
 The opt-in test exercises all four workloads headlessly. The graphical rendering run verified object, primitive and draw-call counters; comparison with PresentMon and validation of displayed-frame accuracy remain pending. These measurements do not establish game performance or validated hardware requirements.
+
+
+### Adapter protocol v1 foundation
+
+The Rust `gdpl-adapter-sdk` crate defines the v1 request envelope, metric definitions, clock-domain labels and a lifecycle state machine. The wire format remains newline-delimited JSON over the controlled process stdin/stdout; requests include `version`, `id`, `command`, and `data`, and replies include the matching version and ID and `ok`. Messages are limited to 8192 bytes, and the runner uses a configurable bounded timeout. See `schemas/adapter-protocol-v1.json` for the envelope and metric definition schema. Existing v1 peers without structured metric definitions remain supported.
+
+Adapters may advertise `list_scenarios`, `set_load`, `reset`, `metrics` and `shutdown`; the Godot example additionally provides scenario discovery and metric definitions. The runner verifies `set_load`, validates advertised scenarios, and rejects unknown or explicitly unavailable metrics when definitions are supplied. Initialization remains responsible for validating workload parameters. The `set_load` response acknowledges readiness and may provide an observed load. A provider should return `ok: false`, an `error` string and optionally an `error_code` when an operation fails.
+
+Metric definitions describe units, source, snapshot method, availability and timestamp domain; the existing descriptions and raw samples are preserved in reports. Godot metric samples do not have individual engine timestamps, so their domain is marked unavailable. Host, engine, OS and graphics-capture clocks are not synchronized; cross-source correlation and per-frame reconstruction are not supported. The current SDK foundation does not yet include clock correlation, complete cross-language bindings, or verified Unreal/Unity integrations.
+
+Runnable protocol inspectors are provided in `crates/gdpl-adapter-sdk/examples/inspect_adapter.rs` and `sdk/csharp/`; pass the adapter executable and its arguments. Both inspect `hello` and `list_scenarios` and then request shutdown. They are examples, not production supervisors: they do not implement timeout or forced cleanup. C and C++ examples are not yet available.

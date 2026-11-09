@@ -203,6 +203,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdpl-adapter-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gdpl-analyzer"
 version = "0.1.0"
 dependencies = [
@@ -214,6 +222,7 @@ dependencies = [
 name = "gdpl-core"
 version = "0.1.0"
 dependencies = [
+ "gdpl-adapter-sdk",
  "serde",
 ]
 
@@ -229,6 +238,7 @@ dependencies = [
 name = "gdpl-stress"
 version = "0.1.0"
 dependencies = [
+ "gdpl-adapter-sdk",
  "gdpl-core",
  "serde",
  "serde_json",

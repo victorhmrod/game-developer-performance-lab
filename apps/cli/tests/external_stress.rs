@@ -113,6 +113,8 @@ fn fault_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 fn protocol_failures_remain_distinct_and_incomplete() {
     for mode in [
         "bad_version",
+        "missing_capability",
+        "missing_scenario",
         "bad_metadata",
         "bad_pid",
         "hang",
@@ -132,7 +134,8 @@ fn protocol_failures_remain_distinct_and_incomplete() {
         assert_eq!(status.code(), Some(5), "{mode}: {report}");
         let termination = report["termination"].as_str().unwrap();
         match mode {
-            "bad_version" | "bad_metadata" | "bad_pid" | "hang" => {
+            "bad_version" | "bad_metadata" | "bad_pid" | "hang" | "missing_capability"
+            | "missing_scenario" => {
                 assert_eq!(termination, "initialization_failed")
             }
             "bad_ack" | "bad_observed" => {

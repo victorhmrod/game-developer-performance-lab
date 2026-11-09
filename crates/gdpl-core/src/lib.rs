@@ -99,6 +99,14 @@ pub trait StressScenarioProvider {
     fn reset(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Provider identification supplied by the peer and not independently verified.
+    fn provider_info(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        None
+    }
+    /// Descriptions for provider-reported metrics; not independently verified.
+    fn metric_metadata(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        None
+    }
     /// Provider-reported values have no implicit unit or trust guarantee.
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, Self::Error> {
         Ok(None)

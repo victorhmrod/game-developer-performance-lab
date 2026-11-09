@@ -52,8 +52,19 @@ pub struct Stage {
     pub sample_count: usize,
     pub mean_cpu_percent: Option<f32>,
     pub peak_memory_bytes: Option<u64>,
+    /// Statistics over polled provider snapshots, not per-frame distributions.
+    pub provider_metric_summaries: std::collections::BTreeMap<String, MetricSummary>,
+    pub missing_provider_metrics: Vec<String>,
     pub samples: Vec<Sample>,
 }
+#[derive(Debug, Serialize)]
+pub struct MetricSummary {
+    pub count: usize,
+    pub mean: Option<f64>,
+    pub median: Option<f64>,
+    pub p95: Option<f64>,
+}
+
 impl Stage {
     fn summarize(&mut self) {
         self.sample_count = self.samples.len();
@@ -72,6 +83,34 @@ impl Stage {
             .iter()
             .map(|sample| sample.process_memory_bytes)
             .max();
+        let mut values = std::collections::BTreeMap::<String, Vec<f64>>::new();
+        for sample in &self.samples {
+            if let Some(metrics) = &sample.provider_metrics {
+                for (name, value) in metrics {
+                    values.entry(name.clone()).or_default().push(*value);
+                }
+            }
+        }
+        for (name, mut observations) in values {
+            observations.sort_by(f64::total_cmp);
+            let mean = observations.iter().sum::<f64>() / observations.len() as f64;
+            let percentile = |p: f64| {
+                let index = (observations.len() - 1) as f64 * p;
+                let low = observations[index.floor() as usize];
+                let high = observations[index.ceil() as usize];
+                let result = low + (high - low) * index.fract();
+                result.is_finite().then_some(result)
+            };
+            self.provider_metric_summaries.insert(
+                name,
+                MetricSummary {
+                    count: observations.len(),
+                    mean: mean.is_finite().then_some(mean),
+                    median: percentile(0.5),
+                    p95: percentile(0.95),
+                },
+            );
+        }
     }
 }
 #[derive(Debug, Serialize)]
@@ -80,6 +119,8 @@ pub struct Report {
     pub started_unix_ms: u128,
     pub config: Config,
     pub scenario_kind: String,
+    pub provider_info: Option<std::collections::BTreeMap<String, String>>,
+    pub provider_metric_metadata: Option<std::collections::BTreeMap<String, String>>,
     pub stages: Vec<Stage>,
     pub termination: String,
     pub diagnostic: Option<String>,
@@ -184,6 +225,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
     let mut target_pid = None;
     let mut target_start_time = None;
     let mut target_creation_time = None;
+    let mut provider_metric_metadata = None;
+    let mut provider_info = None;
     let mut maximum_completed_load = None;
     let mut peak_memory: Option<u64> = None;
     let mut system = System::new();
@@ -197,6 +240,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
         provider
             .initialize(&config.scenario)
             .map_err(|e| format!("initialization failed: {e}"))?;
+        provider_info = provider.provider_info();
+        provider_metric_metadata = provider.metric_metadata();
         target_pid = Some(provider.target_pid().unwrap_or(std::process::id()));
         let target_id = target_pid.unwrap();
         let identity = process::Identity::open(target_id)
@@ -243,6 +288,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     sample_count: 0,
                     mean_cpu_percent: None,
                     peak_memory_bytes: None,
+                    provider_metric_summaries: Default::default(),
+                    missing_provider_metrics: Vec::new(),
                     samples: Vec::new(),
                 };
                 if let Err(error) = provider.reset() {
@@ -449,12 +496,23 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
             error
         }
     };
+    if let Some(metadata) = &provider_metric_metadata {
+        for stage in &mut stages {
+            stage.missing_provider_metrics = metadata
+                .keys()
+                .filter(|key| !stage.provider_metric_summaries.contains_key(*key))
+                .cloned()
+                .collect();
+        }
+    }
     let scenario_kind = config.scenario.id.clone();
     Ok(Report {
         schema_version: 1,
         started_unix_ms,
         config,
         scenario_kind,
+        provider_info,
+        provider_metric_metadata,
         stages,
         termination,
         diagnostic,
@@ -471,7 +529,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
             "Workload semantics are provider-defined; synthetic_memory does not represent gameplay",
             "Resource monitoring samples the selected process only; descendants and GPU are excluded",
             "Memory limit is sampled and can be exceeded between samples",
-            "FPS and frame-time telemetry are unavailable; provider metrics are unverified claims",
+            "Provider metrics and their polled summaries are unverified claims; polling does not capture every frame",
+            "FPS/frame-time threshold evaluation and independent display timing are unavailable",
             "Completed loads are not validated hardware requirements",
             "CPU is percent of one logical core; first observation unavailable",
             "Outside Windows, PID reuse detection uses process start time with one-second precision",
@@ -531,6 +590,41 @@ mod tests {
             sustained_samples: 2,
             external: None,
         }
+    }
+    #[test]
+    fn provider_snapshot_summaries_use_polled_values() {
+        let mut stage = Stage {
+            load: 1,
+            repetition: 1,
+            acknowledged_load: Some(1),
+            warmup_seconds: 0,
+            measurement_seconds: 1,
+            status: "completed".into(),
+            diagnostic: None,
+            sample_count: 0,
+            mean_cpu_percent: None,
+            peak_memory_bytes: None,
+            provider_metric_summaries: Default::default(),
+            missing_provider_metrics: Vec::new(),
+            samples: Vec::new(),
+        };
+        for value in [10.0, 20.0, 30.0] {
+            stage.samples.push(Sample {
+                elapsed_ms: 0,
+                process_memory_bytes: 100,
+                process_cpu_percent: None,
+                provider_metrics: Some(std::collections::BTreeMap::from([(
+                    "frame_ms".into(),
+                    value,
+                )])),
+            });
+        }
+        stage.summarize();
+        let summary = &stage.provider_metric_summaries["frame_ms"];
+        assert_eq!(summary.count, 3);
+        assert_eq!(summary.mean, Some(20.0));
+        assert_eq!(summary.median, Some(20.0));
+        assert_eq!(summary.p95, Some(29.0));
     }
     #[test]
     fn sustained_threshold_resets_on_recovery_and_new_repetition() {

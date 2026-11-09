@@ -25,6 +25,21 @@ pub enum ExternalConfig {
     },
 }
 
+// Some JSON implementations emit integral protocol numbers as floats.
+fn protocol_integer(value: &Value) -> Option<u64> {
+    if let Some(number) = value.as_u64() {
+        return Some(number);
+    }
+    let number = value.as_f64()?;
+    if number.is_finite()
+        && (0.0..=9_007_199_254_740_992.0).contains(&number)
+        && number.fract() == 0.0
+    {
+        return Some(number as u64);
+    }
+    None
+}
+
 pub struct External {
     config: ExternalConfig,
     child: Option<Child>,
@@ -36,6 +51,8 @@ pub struct External {
     controlled: bool,
     supports_reset: bool,
     supports_metrics: bool,
+    metric_metadata: Option<std::collections::BTreeMap<String, String>>,
+    provider_info: Option<std::collections::BTreeMap<String, String>>,
     timeout: Duration,
 }
 
@@ -52,6 +69,8 @@ impl External {
             controlled: false,
             supports_reset: false,
             supports_metrics: false,
+            metric_metadata: None,
+            provider_info: None,
             timeout: Duration::from_secs(2),
         }
     }
@@ -81,7 +100,9 @@ impl External {
             .map_err(|e| format!("protocol response timeout or disconnect: {e}"))??;
         let response: Value =
             serde_json::from_str(&line).map_err(|e| format!("malformed protocol response: {e}"))?;
-        if response["version"] != 1 || response["id"].as_u64() != Some(self.sequence) {
+        if protocol_integer(&response["version"]) != Some(1)
+            || protocol_integer(&response["id"]) != Some(self.sequence)
+        {
             return Err("protocol version or request id mismatch".into());
         }
         if response["ok"] != true {
@@ -200,6 +221,42 @@ impl StressScenarioProvider for External {
         let capabilities = hello["capabilities"].as_array().unwrap();
         self.supports_reset = capabilities.iter().any(|value| value == "reset");
         self.supports_metrics = capabilities.iter().any(|value| value == "metrics");
+        if let Some(info) = hello.get("provider_info") {
+            let entries = info.as_object().ok_or("provider_info must be an object")?;
+            if entries.len() > 16 {
+                return Err("too many provider information fields".into());
+            }
+            let mut values = std::collections::BTreeMap::new();
+            for (key, value) in entries {
+                let text = value
+                    .as_str()
+                    .ok_or("provider information must be a string")?;
+                if key.is_empty() || key.len() > 128 || text.len() > 512 {
+                    return Err("invalid provider information".into());
+                }
+                values.insert(key.clone(), text.to_string());
+            }
+            self.provider_info = Some(values);
+        }
+        if let Some(metadata) = hello.get("metric_metadata") {
+            let entries = metadata
+                .as_object()
+                .ok_or("metric_metadata must be an object")?;
+            if entries.len() > 64 {
+                return Err("too many metric descriptions".into());
+            }
+            let mut descriptions = std::collections::BTreeMap::new();
+            for (key, value) in entries {
+                let description = value
+                    .as_str()
+                    .ok_or("metric description must be a string")?;
+                if key.is_empty() || key.len() > 128 || description.len() > 512 {
+                    return Err("invalid metric description".into());
+                }
+                descriptions.insert(key.clone(), description.to_string());
+            }
+            self.metric_metadata = Some(descriptions);
+        }
         self.request("initialize", json!({"scenario": scenario.id, "parameters": scenario.parameters, "maximum_load": scenario.maximum_load}))?;
         Ok(())
     }
@@ -208,6 +265,12 @@ impl StressScenarioProvider for External {
             self.request("reset", json!({}))?;
         }
         Ok(())
+    }
+    fn provider_info(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        self.provider_info.clone()
+    }
+    fn metric_metadata(&self) -> Option<std::collections::BTreeMap<String, String>> {
+        self.metric_metadata.clone()
     }
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
         if !self.supports_metrics {
@@ -235,7 +298,7 @@ impl StressScenarioProvider for External {
             return Ok(());
         }
         let response = self.request("set_load", json!({"load": load}))?;
-        if response["load"].as_u64() != Some(load) || response["ready"] != true {
+        if protocol_integer(&response["load"]) != Some(load) || response["ready"] != true {
             return Err("workload was not acknowledged as ready".into());
         }
         Ok(())
@@ -335,5 +398,18 @@ impl Drop for External {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    #[test]
+    fn accepts_exact_json_integers_but_not_fractional_or_inexact_values() {
+        assert_eq!(protocol_integer(&json!(1.0)), Some(1));
+        assert_eq!(protocol_integer(&json!(1.5)), None);
+        assert_eq!(protocol_integer(&json!(-1.0)), None);
+        assert_eq!(protocol_integer(&json!(9_007_199_254_740_994.0)), None);
+        assert_eq!(protocol_integer(&json!(u64::MAX)), Some(u64::MAX));
     }
 }

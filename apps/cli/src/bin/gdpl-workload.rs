@@ -28,6 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match request["command"].as_str() {
             Some("hello") => {
                 reply["capabilities"] = json!(["set_load", "shutdown", "reset", "metrics"]);
+                reply["provider_info"] = json!({"name": "synthetic reference", "version": "1"});
+                reply["metric_metadata"] = json!({"allocated_bytes": "bytes; synthetic provider-reported allocation length"});
             }
             Some("initialize") => {
                 if request["data"]["maximum_load"]

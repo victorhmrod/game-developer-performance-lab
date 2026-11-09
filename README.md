@@ -1,6 +1,6 @@
 # Game Developer Performance Lab
 
-GDPL is an early-stage, engine-independent performance tooling project. The implemented slice launches and samples an external process and analyzes existing PresentMon CSV captures. An experimental Windows command supervises an external PresentMon capture, but has not been validated with a real graphics application. It does not provide engine integrations. This is not a release or a complete benchmark suite.
+GDPL is an early-stage, engine-independent performance tooling project. The implemented slice launches and samples an external process and analyzes existing PresentMon CSV captures. An experimental Windows command supervises an external PresentMon capture, but has not been validated with a real graphics application. A Godot adapter example is present but has not been run or validated with Godot. This is not a release or a complete benchmark suite.
 
 ## Build and run
 
@@ -82,4 +82,28 @@ For an already running process, use `"external": {"mode":"attach", "pid":1234}`.
 
 Controlled launched processes exchange UTF-8 JSON lines over inherited stdin/stdout, with one request in flight and a maximum of 8192 bytes per line including newline. Stdout is reserved for protocol messages; stderr is inherited for diagnostics. Each request has `version: 1`, an increasing numeric `id`, `command`, and `data`. Each response echoes `version` and `id`, has boolean `ok`, and supplies `error` on failure. Unexpected output, malformed messages, EOF, a version or ID mismatch, missing acknowledgement, or I/O timeout fails the run. Writes and responses are individually timed; a blocked process can extend cleanup by the configured timeout.
 
-The runner sends `hello` with `data.versions: [1]`; the response advertises a `capabilities` array including `set_load`. It then sends `initialize` with scenario name, parameters and maximum load. If `reset` is advertised, it is requested before each repetition. `set_load` includes `data.load`; its response must echo `load` and include `ready: true` before warmup begins. If `metrics` is advertised, responses may include up to 64 finite numeric values under `metrics`; these are unverified provider statements, not FPS or frame timings. Finally `shutdown` is requested and the owned process is waited on. See [the reference executable](apps/cli/src/bin/gdpl-workload.rs) for a runnable example. This preliminary protocol has no engine SDK, independently verified frame telemetry, external attach control, or distributed transport; it is not yet a stable adapter API.
+The runner sends `hello` with `data.versions: [1]`; the response advertises a `capabilities` array including `set_load`. It then sends `initialize` with scenario name, parameters and maximum load. If `reset` is advertised, it is requested before each repetition. `set_load` includes `data.load`; its response must echo `load` and include `ready: true` before warmup begins. If `metrics` is advertised, responses may include up to 64 finite numeric values under `metrics`. Optional `provider_info` and `metric_metadata` maps in `hello` describe provider identity, units and provenance; both are unverified provider statements. The report preserves polled observations, per-stage snapshot summaries, and declared metrics missing from a stage. These are not independent measurements or complete frame distributions. Finally `shutdown` is requested and the owned process is waited on. See [the reference executable](apps/cli/src/bin/gdpl-workload.rs) for a runnable example. This preliminary protocol has no engine SDK, independently verified frame telemetry, external attach control, or distributed transport; it is not yet a stable adapter API.
+
+
+## Experimental Godot adapter example
+
+The project in `adapters/godot/example` targets a Godot 4.5+ console executable and has **not been run or validated** because Godot was not available in the development environment. No Godot version or graphics backend is currently verified. Install or provide Godot separately, then replace `external.executable` in `scenarios/godot-example.json` with its executable path and run from the repository root:
+
+```powershell
+cargo run -p gdpl -- stress run --scenario scenarios/godot-example.json --output godot-results.json
+```
+
+The example uses `--headless` and `--no-header`; do not use `--quiet`, which silences stdout. Godot 4.5 documents `--no-header`, needed because stdout carries protocol replies. On Windows use a console executable capable of reading redirected stdin. To exercise a renderer, remove `--headless` and verify stdout contains only protocol messages. A headless run does not validate rendering performance.
+
+Choose `scenario.parameters.workload` from `nodes`, `physics`, `rendering`, and `animation`. One load unit means one active node, rigid body, mesh instance, or animation player respectively; ceilings are 1000, 128, 512, and 256. The physics case also creates a static floor. Scenes use generated geometry and no proprietary assets. These workloads are synthetic and do not represent game scalability. The adapter intends to clear each workload on reset and shutdown, acknowledge after a process frame, and stop on stdin EOF; those engine behaviors remain unverified. The project has no editor plugin or automatic installation.
+
+The adapter declares descriptions in `provider_metric_metadata`. It intends to report Godot's monotonic startup clock, the last adapter `_process` interval, Godot FPS, process/physics time and node count; rendering counters are omitted in headless mode. FPS is Godot's periodically updated monitor, not an independently counted display FPS. The interval is between script callbacks, not display presents. GDPL polls provider values roughly every 250 ms after process sampling: the last callback interval is a snapshot, and means/medians/P95 describe polled snapshots, not every frame. GDPL and Godot clocks are recorded separately without synchronization; `missing_provider_metrics` records declared values absent in a stage. Queue/event loss and graphics presentation coverage are unknown. Unavailable values are omitted, and thresholds using FPS are not implemented.
+
+After installing a compatible Godot console executable, the opt-in engine test can be run with:
+
+```powershell
+$env:GDPL_GODOT = 'C:\path\to\godot_console.exe'
+cargo test -p gdpl --test godot --locked -- --ignored
+```
+
+This test and real graphics comparison with PresentMon remain pending. A successful headless test would establish only the tested headless IPC and engine behavior; it would not validate displayed-frame accuracy or all four workloads.

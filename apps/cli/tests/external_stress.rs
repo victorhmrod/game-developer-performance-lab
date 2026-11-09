@@ -33,6 +33,13 @@ fn controls_and_measures_real_external_process() {
     );
     assert!(status.success());
     assert_eq!(report["termination"], "completed");
+    assert_eq!(report["provider_info"]["name"], "synthetic reference");
+    assert!(
+        report["provider_metric_metadata"]["allocated_bytes"]
+            .as_str()
+            .unwrap()
+            .contains("bytes")
+    );
     assert_eq!(report["cleanup"], "completed");
     assert_eq!(report["stages"].as_array().unwrap().len(), 2);
     assert_eq!(report["maximum_acknowledged_load"], 2);
@@ -44,6 +51,10 @@ fn controls_and_measures_real_external_process() {
         Some(1024.0)
     );
     assert!(report["stages"][0]["peak_memory_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(
+        report["stages"][0]["provider_metric_summaries"]["allocated_bytes"]["count"],
+        report["stages"][0]["sample_count"]
+    );
     assert!(report["target_pid"].as_u64().unwrap() != std::process::id() as u64);
 }
 #[test]
@@ -98,7 +109,7 @@ fn fault_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 }
 #[test]
 fn protocol_failures_remain_distinct_and_incomplete() {
-    for mode in ["bad_version", "hang", "bad_ack", "early"] {
+    for mode in ["bad_version", "bad_metadata", "hang", "bad_ack", "early"] {
         let temp = tempfile::tempdir().unwrap();
         let fixture = fault_fixture(temp.path());
         let (status, report) = execute(
@@ -111,7 +122,9 @@ fn protocol_failures_remain_distinct_and_incomplete() {
         assert_eq!(status.code(), Some(5), "{mode}: {report}");
         let termination = report["termination"].as_str().unwrap();
         match mode {
-            "bad_version" | "hang" => assert_eq!(termination, "initialization_failed"),
+            "bad_version" | "bad_metadata" | "hang" => {
+                assert_eq!(termination, "initialization_failed")
+            }
             "bad_ack" => {
                 assert_eq!(termination, "workload_failed");
                 assert!(report["stages"][0]["acknowledged_load"].is_null());
@@ -131,4 +144,46 @@ fn protocol_failures_remain_distinct_and_incomplete() {
             );
         }
     }
+}
+
+#[test]
+fn missing_and_invalid_provider_metrics_are_explicit() {
+    for mode in ["missing_metric", "invalid_metric"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = fault_fixture(temp.path());
+        let (status, report) = execute(
+            temp.path(),
+            config(
+                json!({"mode":"launch","executable":fixture,"arguments":[mode],"working_directory":null,"controlled":true,"timeout_ms":1000}),
+                1,
+            ),
+        );
+        if mode == "missing_metric" {
+            assert!(status.success(), "{report}");
+            assert_eq!(
+                report["stages"][0]["missing_provider_metrics"][0],
+                "frame_ms"
+            );
+            assert!(report["maximum_validated_load"].is_null());
+        } else {
+            assert_eq!(status.code(), Some(5));
+            assert_eq!(report["termination"], "target_failed");
+            assert!(report["diagnostic"].as_str().unwrap().contains("finite"));
+        }
+    }
+}
+
+#[test]
+fn accepts_exact_float_protocol_numbers() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fault_fixture(temp.path());
+    let (status, report) = execute(
+        temp.path(),
+        config(
+            json!({"mode":"launch","executable":fixture,"arguments":["float_numbers"],"working_directory":null,"controlled":true,"timeout_ms":1000}),
+            1,
+        ),
+    );
+    assert!(status.success(), "{report}");
+    assert_eq!(report["maximum_acknowledged_load"], 1);
 }

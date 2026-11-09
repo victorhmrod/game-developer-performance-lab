@@ -1,0 +1,5 @@
+{
+  "scenario": {"id":"external_process","parameters":{"workload":"nodes"},"initial_load":10,"load_increment":10,"maximum_load":30,"measurement_seconds":3,"maximum_duration_seconds":30,"maximum_memory_bytes":1073741824,"minimum_fps":null},
+  "strategy":"linear", "warmup_seconds":1, "repetitions":1, "maximum_cpu_percent":null, "sustained_samples":2,
+  "external":{"mode":"launch","executable":"godot","arguments":["--no-header","--headless","--path","adapters/godot/example"],"working_directory":null,"controlled":true,"timeout_ms":10000}
+}

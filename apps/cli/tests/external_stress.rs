@@ -46,6 +46,8 @@ fn controls_and_measures_real_external_process() {
     assert_eq!(report["maximum_completed_load"], 2);
     assert!(report["maximum_validated_load"].is_null());
     assert_eq!(report["stages"][0]["acknowledged_load"], 1);
+    assert!(report["stages"][0]["samples"][0]["process_cpu_percent"].is_null());
+    assert!(report["stages"][1]["samples"][0]["process_cpu_percent"].is_null());
     assert_eq!(
         report["stages"][0]["samples"][0]["provider_metrics"]["allocated_bytes"].as_f64(),
         Some(1024.0)

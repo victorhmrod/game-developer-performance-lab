@@ -55,6 +55,8 @@ pub struct Stage {
     /// Statistics over polled provider snapshots, not per-frame distributions.
     pub provider_metric_summaries: std::collections::BTreeMap<String, MetricSummary>,
     pub missing_provider_metrics: Vec<String>,
+    /// Responses received after the measurement boundary are not included.
+    pub late_provider_responses: u64,
     pub samples: Vec<Sample>,
 }
 #[derive(Debug, Serialize)]
@@ -277,6 +279,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     Some(maximum_attempted_load.map_or(load, |previous: u64| previous.max(load)));
                 let mut cpu_violations = 0;
                 let mut cpu_valid_samples = 0;
+                let mut measurement_cpu_primed = false;
                 let mut stage = Stage {
                     load,
                     repetition,
@@ -290,6 +293,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     peak_memory_bytes: None,
                     provider_metric_summaries: Default::default(),
                     missing_provider_metrics: Vec::new(),
+                    late_provider_responses: 0,
                     samples: Vec::new(),
                 };
                 if let Err(error) = provider.reset() {
@@ -384,6 +388,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     };
                     prior_cpu_sample = true;
                     let observed_at = start.elapsed();
+                    let observed_in_stage = stage_start.elapsed();
                     if memory > config.scenario.maximum_memory_bytes {
                         termination = "memory_limit".into();
                     }
@@ -397,8 +402,10 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     {
                         termination = "cpu_limit".into();
                     }
-                    if stage_start.elapsed() >= Duration::from_secs(config.warmup_seconds) {
-                        let provider_metrics = if termination != "completed" {
+                    if observed_in_stage >= Duration::from_secs(config.warmup_seconds)
+                        && observed_in_stage < total
+                    {
+                        let mut provider_metrics = if termination != "completed" {
                             None
                         } else {
                             match provider.metrics() {
@@ -413,10 +420,19 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                                 }
                             }
                         };
+                        if provider_metrics.is_some()
+                            && (stage_start.elapsed() >= total || cancelled.load(Ordering::SeqCst))
+                        {
+                            stage.late_provider_responses += 1;
+                            provider_metrics = None;
+                        }
+                        // The preceding CPU interval can overlap warmup or a previous stage.
+                        let measurement_cpu = if measurement_cpu_primed { cpu } else { None };
+                        measurement_cpu_primed = true;
                         stage.samples.push(Sample {
                             elapsed_ms: observed_at.as_millis() as u64,
                             process_memory_bytes: memory,
-                            process_cpu_percent: cpu,
+                            process_cpu_percent: measurement_cpu,
                             provider_metrics,
                         });
                     }
@@ -424,6 +440,9 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                         break;
                     }
                     thread::sleep(Duration::from_millis(250));
+                }
+                if termination == "completed" && cancelled.load(Ordering::SeqCst) {
+                    termination = "cancelled".into();
                 }
                 if termination == "completed"
                     && start.elapsed()
@@ -592,6 +611,79 @@ mod tests {
         }
     }
     #[test]
+    fn cancellation_during_metric_request_does_not_complete_stage() {
+        struct CancelProvider<'a>(&'a AtomicBool);
+        impl StressScenarioProvider for CancelProvider<'_> {
+            type Error = String;
+            fn initialize(&mut self, _: &StressScenario) -> Result<(), String> {
+                Ok(())
+            }
+            fn set_load(&mut self, _: u64) -> Result<(), String> {
+                Ok(())
+            }
+            fn metrics(
+                &mut self,
+            ) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(Some(std::collections::BTreeMap::from([(
+                    "frame_ms".into(),
+                    1.0,
+                )])))
+            }
+            fn cleanup(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let flag = AtomicBool::new(false);
+        let mut plan = config();
+        plan.strategy = Strategy::Fixed;
+        plan.scenario.maximum_load = plan.scenario.initial_load;
+        let report = run(plan, &mut CancelProvider(&flag), &flag).unwrap();
+        assert_eq!(report.termination, "cancelled");
+        assert_eq!(report.stages[0].late_provider_responses, 1);
+        assert!(report.stages[0].provider_metric_summaries.is_empty());
+        assert!(report.maximum_completed_load.is_none());
+    }
+    #[test]
+    fn late_provider_metrics_are_excluded_from_measurement() {
+        struct SlowProvider;
+        impl StressScenarioProvider for SlowProvider {
+            type Error = String;
+            fn initialize(&mut self, _: &StressScenario) -> Result<(), String> {
+                Ok(())
+            }
+            fn set_load(&mut self, _: u64) -> Result<(), String> {
+                Ok(())
+            }
+            fn metrics(
+                &mut self,
+            ) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
+                std::thread::sleep(Duration::from_millis(1200));
+                Ok(Some(std::collections::BTreeMap::from([(
+                    "frame_ms".into(),
+                    1.0,
+                )])))
+            }
+            fn metric_metadata(&self) -> Option<std::collections::BTreeMap<String, String>> {
+                Some(std::collections::BTreeMap::from([(
+                    "frame_ms".into(),
+                    "milliseconds; test provider".into(),
+                )]))
+            }
+            fn cleanup(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let mut plan = config();
+        plan.strategy = Strategy::Fixed;
+        plan.scenario.maximum_load = plan.scenario.initial_load;
+        let report = run(plan, &mut SlowProvider, &AtomicBool::new(false)).unwrap();
+        assert_eq!(report.stages[0].late_provider_responses, 1);
+        assert!(report.stages[0].provider_metric_summaries.is_empty());
+        assert_eq!(report.stages[0].missing_provider_metrics, vec!["frame_ms"]);
+        assert!(report.maximum_validated_load.is_none());
+    }
+    #[test]
     fn provider_snapshot_summaries_use_polled_values() {
         let mut stage = Stage {
             load: 1,
@@ -606,6 +698,7 @@ mod tests {
             peak_memory_bytes: None,
             provider_metric_summaries: Default::default(),
             missing_provider_metrics: Vec::new(),
+            late_provider_responses: 0,
             samples: Vec::new(),
         };
         for value in [10.0, 20.0, 30.0] {

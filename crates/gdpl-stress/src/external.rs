@@ -236,6 +236,14 @@ impl StressScenarioProvider for External {
                 }
                 values.insert(key.clone(), text.to_string());
             }
+            if let Some(pid) = values.get("process_id") {
+                let pid = pid
+                    .parse::<u32>()
+                    .map_err(|_| "invalid provider process_id")?;
+                if Some(pid) != self.pid {
+                    return Err("provider process_id differs from launched process; launch the engine executable directly, not a wrapper".into());
+                }
+            }
             self.provider_info = Some(values);
         }
         if let Some(metadata) = hello.get("metric_metadata") {
@@ -298,7 +306,12 @@ impl StressScenarioProvider for External {
             return Ok(());
         }
         let response = self.request("set_load", json!({"load": load}))?;
-        if protocol_integer(&response["load"]) != Some(load) || response["ready"] != true {
+        if protocol_integer(&response["load"]) != Some(load)
+            || response["ready"] != true
+            || response
+                .get("observed_load")
+                .is_some_and(|value| protocol_integer(value) != Some(load))
+        {
             return Err("workload was not acknowledged as ready".into());
         }
         Ok(())

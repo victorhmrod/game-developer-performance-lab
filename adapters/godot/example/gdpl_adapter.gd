@@ -10,6 +10,13 @@ const METADATA := {
     "godot_process_ms": "milliseconds; Performance.TIME_PROCESS, converted from seconds",
     "godot_physics_ms": "milliseconds; Performance.TIME_PHYSICS_PROCESS, converted from seconds",
     "godot_node_count": "nodes; Performance.OBJECT_NODE_COUNT",
+    "godot_workload_count": "objects; direct workload objects currently in the scene tree",
+    "godot_processing_nodes": "nodes; workload nodes with processing enabled; nodes workload only",
+    "godot_physics_active": "bodies; Performance.PHYSICS_3D_ACTIVE_OBJECTS; physics workload only",
+    "godot_physics_pairs": "pairs; Performance.PHYSICS_3D_COLLISION_PAIRS; physics workload only",
+    "godot_animation_playing": "players; workload AnimationPlayer instances reporting is_playing; animation workload only",
+    "godot_animation_position_sum_s": "seconds; sum of current animation positions; animation workload only",
+    "godot_render_draw_calls": "draw calls; Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME; graphical mode only",
     "godot_render_objects": "objects; Performance.RENDER_TOTAL_OBJECTS_IN_FRAME; only when not headless",
     "godot_render_primitives": "primitives; Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME; only when not headless"
 }
@@ -92,7 +99,7 @@ func _on_request(line: String) -> void:
                 reply["capabilities"] = ["set_load", "reset", "metrics", "shutdown"]
                 reply["scenarios"] = LIMITS.keys()
                 reply["metric_metadata"] = METADATA
-                reply["provider_info"] = {"engine": "Godot", "engine_version": str(Engine.get_version_info().get("string", "unknown")), "adapter_version": "0.1.0", "display_backend": DisplayServer.get_name()}
+                reply["provider_info"] = {"engine": "Godot", "process_id": str(OS.get_process_id()), "engine_version": str(Engine.get_version_info().get("string", "unknown")), "adapter_version": "0.1.0", "display_backend": DisplayServer.get_name(), "video_adapter": RenderingServer.get_video_adapter_name(), "video_vendor": RenderingServer.get_video_adapter_vendor(), "graphics_api": RenderingServer.get_video_adapter_api_version()}
             "initialize":
                 var params = data.get("parameters", {})
                 if not params is Dictionary:
@@ -119,8 +126,14 @@ func _on_request(line: String) -> void:
                     _clear_workload()
                     _create_workload(load)
                     await get_tree().process_frame
-                    reply["load"] = load
-                    reply["ready"] = true
+                    var observed := _workload_count()
+                    if observed != load:
+                        reply["ok"] = false
+                        reply["error"] = "observed workload does not match requested load"
+                    else:
+                        reply["load"] = load
+                        reply["observed_load"] = observed
+                        reply["ready"] = true
             "metrics":
                 if not initialized:
                     reply["ok"] = false
@@ -170,6 +183,7 @@ func _create_workload(load: int) -> void:
             sphere.radius = 0.4
             for i in range(load):
                 var body := RigidBody3D.new()
+                body.can_sleep = false
                 var collider := CollisionShape3D.new()
                 collider.shape = sphere
                 body.add_child(collider)
@@ -203,8 +217,40 @@ func _create_workload(load: int) -> void:
                 workload_root.add_child(object)
                 player.play("rotate")
 
+func _workload_count() -> int:
+    var count := 0
+    for child in workload_root.get_children():
+        match workload_kind:
+            "nodes":
+                if child.get_script() == ActiveNode: count += 1
+            "physics":
+                if child is RigidBody3D: count += 1
+            "rendering":
+                if child is MeshInstance3D: count += 1
+            "animation":
+                if child is Node3D and child.get_child_count() > 0 and child.get_child(0) is AnimationPlayer: count += 1
+    return count
+
 func _metrics() -> Dictionary:
-    var result := {"godot_clock_us": Time.get_ticks_usec(), "godot_node_count": Performance.get_monitor(Performance.OBJECT_NODE_COUNT)}
+    var result := {"godot_clock_us": Time.get_ticks_usec(), "godot_node_count": Performance.get_monitor(Performance.OBJECT_NODE_COUNT), "godot_workload_count": _workload_count()}
+    if workload_kind == "nodes":
+        var processing := 0
+        for child in workload_root.get_children():
+            if child.is_processing(): processing += 1
+        result["godot_processing_nodes"] = processing
+    if workload_kind == "physics":
+        result["godot_physics_active"] = Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS)
+        result["godot_physics_pairs"] = Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS)
+    if workload_kind == "animation":
+        var playing := 0
+        var position_sum := 0.0
+        for child in workload_root.get_children():
+            if child.get_child_count() > 0 and child.get_child(0) is AnimationPlayer:
+                var player: AnimationPlayer = child.get_child(0)
+                if player.is_playing(): playing += 1
+                position_sum += player.current_animation_position
+        result["godot_animation_playing"] = playing
+        result["godot_animation_position_sum_s"] = position_sum
     if process_interval_ms > 0.0:
         result["godot_process_interval_ms"] = process_interval_ms
     var fps := Performance.get_monitor(Performance.TIME_FPS)
@@ -217,6 +263,7 @@ func _metrics() -> Dictionary:
     if physics_seconds > 0.0:
         result["godot_physics_ms"] = physics_seconds * 1000.0
     if DisplayServer.get_name() != "headless":
+        result["godot_render_draw_calls"] = Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)
         result["godot_render_objects"] = Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)
         result["godot_render_primitives"] = Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
     return result

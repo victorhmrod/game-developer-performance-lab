@@ -87,23 +87,23 @@ The runner sends `hello` with `data.versions: [1]`; the response advertises a `c
 
 ## Experimental Godot adapter example
 
-The project in `adapters/godot/example` targets a Godot 4.5+ console executable and has **not been run or validated** because Godot was not available in the development environment. No Godot version or graphics backend is currently verified. Install or provide Godot separately, then replace `external.executable` in `scenarios/godot-example.json` with its executable path and run from the repository root:
+The project in `adapters/godot/example` targets Godot 4.5+. It has been exercised with Godot 4.7.2 on Windows, headless and with OpenGL on an AMD Radeon RX 7900 XTX. Install or provide Godot separately, then replace `external.executable` in `scenarios/godot-example.json` with its executable path and run from the repository root:
 
 ```powershell
 cargo run -p gdpl -- stress run --scenario scenarios/godot-example.json --output godot-results.json
 ```
 
-The example uses `--headless` and `--no-header`; do not use `--quiet`, which silences stdout. Godot 4.5 documents `--no-header`, needed because stdout carries protocol replies. On Windows use a console executable capable of reading redirected stdin. To exercise a renderer, remove `--headless` and verify stdout contains only protocol messages. A headless run does not validate rendering performance.
+The example uses `--headless` and `--no-header`; do not use `--quiet`, which silences stdout. Godot 4.5 documents `--no-header`, needed because stdout carries protocol replies. On Windows launch the main engine executable directly, not the `_console.exe` wrapper: the wrapper starts another process, so monitoring it would measure the wrong CPU and memory. The adapter reports its PID and GDPL rejects a mismatch. To exercise a renderer, remove `--headless` and verify stdout contains only protocol messages. A headless run does not validate rendering performance.
 
-Choose `scenario.parameters.workload` from `nodes`, `physics`, `rendering`, and `animation`. One load unit means one active node, rigid body, mesh instance, or animation player respectively; ceilings are 1000, 128, 512, and 256. The physics case also creates a static floor. Scenes use generated geometry and no proprietary assets. These workloads are synthetic and do not represent game scalability. The adapter intends to clear each workload on reset and shutdown, acknowledge after a process frame, and stop on stdin EOF; those engine behaviors remain unverified. The project has no editor plugin or automatic installation.
+Choose `scenario.parameters.workload` from `nodes`, `physics`, `rendering`, and `animation`. One load unit means one active node, rigid body, mesh instance, or animation player respectively; ceilings are 1000, 128, 512, and 256. The physics case also creates a static floor. Scenes use generated geometry and no proprietary assets. These workloads are synthetic and do not represent game scalability. The adapter clears each workload on reset and shutdown and acknowledges after a process frame only if its observed object count matches the requested load. The tested runs shut down cleanly; abrupt termination and all engine versions remain unverified. The project has no editor plugin or automatic installation.
 
 The adapter declares descriptions in `provider_metric_metadata`. It intends to report Godot's monotonic startup clock, the last adapter `_process` interval, Godot FPS, process/physics time and node count; rendering counters are omitted in headless mode. FPS is Godot's periodically updated monitor, not an independently counted display FPS. The interval is between script callbacks, not display presents. GDPL polls provider values roughly every 250 ms after process sampling: the last callback interval is a snapshot, and means/medians/P95 describe polled snapshots, not every frame. GDPL and Godot clocks are recorded separately without synchronization; `missing_provider_metrics` records declared values absent in a stage. GDPL excludes a provider response received after the measurement boundary or cancellation and counts it in `late_provider_responses`; this bounds the request/response interval but does not verify when the provider produced a cached value. Queue/event loss and graphics presentation coverage are unknown. Unavailable values are omitted, and thresholds using FPS are not implemented.
 
-After installing a compatible Godot console executable, the opt-in engine test can be run with:
+After installing a compatible Godot engine executable, the opt-in engine test can be run with:
 
 ```powershell
-$env:GDPL_GODOT = 'C:\path\to\godot_console.exe'
+$env:GDPL_GODOT = 'C:\path\to\godot.exe'
 cargo test -p gdpl --test godot --locked -- --ignored
 ```
 
-This test and real graphics comparison with PresentMon remain pending. A successful headless test would establish only the tested headless IPC and engine behavior; it would not validate displayed-frame accuracy or all four workloads.
+The opt-in test exercises all four workloads headlessly. The graphical rendering run verified object, primitive and draw-call counters; comparison with PresentMon and validation of displayed-frame accuracy remain pending. These measurements do not establish game performance or validated hardware requirements.

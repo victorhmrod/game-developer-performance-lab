@@ -111,7 +111,15 @@ fn fault_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 }
 #[test]
 fn protocol_failures_remain_distinct_and_incomplete() {
-    for mode in ["bad_version", "bad_metadata", "hang", "bad_ack", "early"] {
+    for mode in [
+        "bad_version",
+        "bad_metadata",
+        "bad_pid",
+        "hang",
+        "bad_ack",
+        "bad_observed",
+        "early",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let fixture = fault_fixture(temp.path());
         let (status, report) = execute(
@@ -124,10 +132,10 @@ fn protocol_failures_remain_distinct_and_incomplete() {
         assert_eq!(status.code(), Some(5), "{mode}: {report}");
         let termination = report["termination"].as_str().unwrap();
         match mode {
-            "bad_version" | "bad_metadata" | "hang" => {
+            "bad_version" | "bad_metadata" | "bad_pid" | "hang" => {
                 assert_eq!(termination, "initialization_failed")
             }
-            "bad_ack" => {
+            "bad_ack" | "bad_observed" => {
                 assert_eq!(termination, "workload_failed");
                 assert!(report["stages"][0]["acknowledged_load"].is_null());
             }

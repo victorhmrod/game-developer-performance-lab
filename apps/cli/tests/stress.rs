@@ -45,3 +45,22 @@ fn stress_memory_stop_has_distinct_exit_code() {
     assert_eq!(report["cleanup"], "completed");
     assert!(report["maximum_completed_load"].is_null());
 }
+
+#[test]
+fn threshold_is_not_passed_with_insufficient_samples() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("result.json");
+    let config = temp.path().join("scenario.json");
+    fs::write(&config, r#"{"scenario":{"id":"synthetic_memory","parameters":{},"initial_load":1,"load_increment":1,"maximum_load":1,"measurement_seconds":1,"maximum_duration_seconds":4,"maximum_memory_bytes":536870912,"minimum_fps":null},"strategy":"fixed","warmup_seconds":0,"repetitions":1,"maximum_cpu_percent":100000,"sustained_samples":100}"#).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_gdpl"))
+        .args(["stress", "run", "--scenario"])
+        .arg(&config)
+        .arg("--output")
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(5));
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert_eq!(report["termination"], "telemetry_failed");
+    assert!(report["maximum_completed_load"].is_null());
+}

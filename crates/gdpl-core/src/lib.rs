@@ -89,6 +89,24 @@ pub trait StressScenarioProvider {
     fn initialize(&mut self, scenario: &StressScenario) -> Result<(), Self::Error>;
     fn set_load(&mut self, load: u64) -> Result<(), Self::Error>;
     fn cleanup(&mut self) -> Result<(), Self::Error>;
+    /// None selects the runner process for in-process scenarios.
+    fn target_pid(&self) -> Option<u32> {
+        None
+    }
+    fn check_health(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    /// Provider-reported values have no implicit unit or trust guarantee.
+    fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, Self::Error> {
+        Ok(None)
+    }
+    /// Whether successful set_load confirms a workload change.
+    fn load_is_acknowledged(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

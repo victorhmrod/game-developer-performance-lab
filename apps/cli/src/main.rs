@@ -34,7 +34,7 @@ enum Commands {
         #[command(subcommand)]
         command: BenchmarkCommand,
     },
-    /// Execute a bounded synthetic stress scenario.
+    /// Execute a bounded stress scenario.
     Stress {
         #[command(subcommand)]
         command: StressCommand,
@@ -138,15 +138,26 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             let cancelled = Arc::new(AtomicBool::new(false));
             let flag = cancelled.clone();
             ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))?;
-            let report = gdpl_stress::run(
-                config,
-                &mut gdpl_stress::SyntheticMemory::default(),
-                &cancelled,
-            )?;
+            let report = if let Some(external) = config.external.clone() {
+                gdpl_stress::run(
+                    config,
+                    &mut gdpl_stress::external::External::new(external),
+                    &cancelled,
+                )?
+            } else {
+                gdpl_stress::run(
+                    config,
+                    &mut gdpl_stress::SyntheticMemory::default(),
+                    &cancelled,
+                )?
+            };
             serde_json::to_writer_pretty(&mut file, &report)?;
             file.write_all(b"\n")?;
             file.sync_all()?;
             println!("Stress run: {}", report.termination);
+            if report.cleanup != "completed" {
+                return Ok(5);
+            }
             return Ok(match report.termination.as_str() {
                 "completed" => 0,
                 "cancelled" => 3,

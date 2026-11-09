@@ -1,0 +1,5 @@
+{
+  "scenario": {"id":"external_process","parameters":{},"initial_load":64,"load_increment":64,"maximum_load":192,"measurement_seconds":1,"maximum_duration_seconds":15,"maximum_memory_bytes":536870912,"minimum_fps":null},
+  "strategy":"linear", "warmup_seconds":0, "repetitions":1, "maximum_cpu_percent":null, "sustained_samples":2,
+  "external":{"mode":"launch","executable":"target/debug/gdpl-workload.exe","arguments":[],"working_directory":null,"controlled":true,"timeout_ms":2000}
+}

@@ -40,10 +40,30 @@ pub struct Sample {
     pub process_cpu_percent: Option<f32>,
     pub provider_metrics: Option<std::collections::BTreeMap<String, f64>>,
 }
+#[derive(Debug, Default, Serialize)]
+pub struct StageTiming {
+    pub workload_requested_us: Option<u64>,
+    pub workload_acknowledged_us: Option<u64>,
+    pub warmup_started_us: Option<u64>,
+    pub warmup_completed_us: Option<u64>,
+    pub measurement_started_us: Option<u64>,
+    pub measurement_completed_us: Option<u64>,
+    pub measurement_window_end_us: Option<u64>,
+    pub observed_measurement_us: Option<u64>,
+}
+#[derive(Debug, Serialize)]
+pub struct ExcludedProviderSample {
+    pub request_started_us: u64,
+    pub response_received_us: u64,
+    pub reason: String,
+    pub metrics: std::collections::BTreeMap<String, f64>,
+}
 #[derive(Debug, Serialize)]
 pub struct Stage {
     pub load: u64,
     pub repetition: u32,
+    pub timing: StageTiming,
+    pub excluded_provider_samples: Vec<ExcludedProviderSample>,
     pub acknowledged_load: Option<u64>,
     pub warmup_seconds: u64,
     pub measurement_seconds: u64,
@@ -126,6 +146,8 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_metric_definitions:
         Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_correlation: Option<gdpl_adapter_sdk::ClockCorrelation>,
     pub stages: Vec<Stage>,
     pub termination: String,
     pub diagnostic: Option<String>,
@@ -138,6 +160,8 @@ pub struct Report {
     pub maximum_validated_load: Option<u64>,
     pub peak_process_memory_bytes: Option<u64>,
     pub cleanup: String,
+    pub cleanup_started_us: u64,
+    pub cleanup_completed_us: u64,
     pub limitations: Vec<&'static str>,
 }
 
@@ -288,6 +312,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                 let mut stage = Stage {
                     load,
                     repetition,
+                    timing: StageTiming::default(),
+                    excluded_provider_samples: Vec::new(),
                     acknowledged_load: None,
                     warmup_seconds: config.warmup_seconds,
                     measurement_seconds: config.scenario.measurement_seconds,
@@ -308,6 +334,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     stages.push(stage);
                     return Err(error);
                 }
+                stage.timing.workload_requested_us = Some(start.elapsed().as_micros() as u64);
                 if let Err(error) = provider.set_load(load) {
                     let error = format!("setting load failed: {error}");
                     stage.status = "failed".into();
@@ -317,11 +344,14 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                 }
                 stage.acknowledged_load = provider.load_is_acknowledged().then_some(load);
                 if stage.acknowledged_load.is_some() {
+                    stage.timing.workload_acknowledged_us =
+                        Some(start.elapsed().as_micros() as u64);
                     maximum_acknowledged_load = Some(
                         maximum_acknowledged_load.map_or(load, |previous: u64| previous.max(load)),
                     );
                 }
                 let stage_start = Instant::now();
+                stage.timing.warmup_started_us = Some(start.elapsed().as_micros() as u64);
                 let total = Duration::from_secs(
                     config.warmup_seconds + config.scenario.measurement_seconds,
                 );
@@ -410,6 +440,12 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     if observed_in_stage >= Duration::from_secs(config.warmup_seconds)
                         && observed_in_stage < total
                     {
+                        if stage.timing.measurement_started_us.is_none() {
+                            let boundary = observed_at.as_micros() as u64;
+                            stage.timing.warmup_completed_us = Some(boundary);
+                            stage.timing.measurement_started_us = Some(boundary);
+                        }
+                        let request_started_us = start.elapsed().as_micros() as u64;
                         let mut provider_metrics = if termination != "completed" {
                             None
                         } else {
@@ -429,7 +465,19 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                             && (stage_start.elapsed() >= total || cancelled.load(Ordering::SeqCst))
                         {
                             stage.late_provider_responses += 1;
-                            provider_metrics = None;
+                            stage
+                                .excluded_provider_samples
+                                .push(ExcludedProviderSample {
+                                    request_started_us,
+                                    response_received_us: start.elapsed().as_micros() as u64,
+                                    reason: if cancelled.load(Ordering::SeqCst) {
+                                        "cancelled"
+                                    } else {
+                                        "after_measurement_window"
+                                    }
+                                    .into(),
+                                    metrics: provider_metrics.take().unwrap(),
+                                });
                         }
                         // The preceding CPU interval can overlap warmup or a previous stage.
                         let measurement_cpu = if measurement_cpu_primed { cpu } else { None };
@@ -445,6 +493,19 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                         break;
                     }
                     thread::sleep(Duration::from_millis(250));
+                }
+                if let Some(measurement_start) = stage.timing.measurement_started_us {
+                    let elapsed = start.elapsed();
+                    let deadline = stage
+                        .timing
+                        .warmup_started_us
+                        .unwrap()
+                        .saturating_add(total.as_micros() as u64);
+                    let completed = (elapsed.as_micros() as u64).min(deadline);
+                    stage.timing.measurement_completed_us = Some(elapsed.as_micros() as u64);
+                    stage.timing.measurement_window_end_us = Some(completed);
+                    stage.timing.observed_measurement_us =
+                        Some(completed.saturating_sub(measurement_start));
                 }
                 if termination == "completed" && cancelled.load(Ordering::SeqCst) {
                     termination = "cancelled".into();
@@ -511,6 +572,13 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
     if target_pid.is_none() {
         target_pid = provider.target_pid();
     }
+    let clock_correlation = provider.clock_correlation();
+    if termination == "cancelled"
+        && let Err(error) = provider.cancel()
+    {
+        diagnostic = Some(format!("cancellation request failed: {error}"));
+    }
+    let cleanup_started_us = start.elapsed().as_micros() as u64;
     let cleanup = match provider.cleanup() {
         Ok(()) => "completed".into(),
         Err(error) => {
@@ -520,6 +588,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
             error
         }
     };
+    let cleanup_completed_us = start.elapsed().as_micros() as u64;
     if let Some(metadata) = &provider_metric_metadata {
         for stage in &mut stages {
             stage.missing_provider_metrics = metadata
@@ -538,6 +607,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
         provider_info,
         provider_metric_metadata,
         provider_metric_definitions,
+        clock_correlation,
         stages,
         termination,
         diagnostic,
@@ -550,6 +620,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
         maximum_validated_load: None,
         peak_process_memory_bytes: peak_memory,
         cleanup,
+        cleanup_started_us,
+        cleanup_completed_us,
         limitations: vec![
             "Workload semantics are provider-defined; synthetic_memory does not represent gameplay",
             "Resource monitoring samples the selected process only; descendants and GPU are excluded",
@@ -648,6 +720,7 @@ mod tests {
         let report = run(plan, &mut CancelProvider(&flag), &flag).unwrap();
         assert_eq!(report.termination, "cancelled");
         assert_eq!(report.stages[0].late_provider_responses, 1);
+        assert_eq!(report.stages[0].excluded_provider_samples.len(), 1);
         assert!(report.stages[0].provider_metric_summaries.is_empty());
         assert!(report.maximum_completed_load.is_none());
     }
@@ -686,6 +759,7 @@ mod tests {
         plan.scenario.maximum_load = plan.scenario.initial_load;
         let report = run(plan, &mut SlowProvider, &AtomicBool::new(false)).unwrap();
         assert_eq!(report.stages[0].late_provider_responses, 1);
+        assert_eq!(report.stages[0].excluded_provider_samples.len(), 1);
         assert!(report.stages[0].provider_metric_summaries.is_empty());
         assert_eq!(report.stages[0].missing_provider_metrics, vec!["frame_ms"]);
         assert!(report.maximum_validated_load.is_none());
@@ -695,6 +769,8 @@ mod tests {
         let mut stage = Stage {
             load: 1,
             repetition: 1,
+            timing: StageTiming::default(),
+            excluded_provider_samples: Vec::new(),
             acknowledged_load: Some(1),
             warmup_seconds: 0,
             measurement_seconds: 1,

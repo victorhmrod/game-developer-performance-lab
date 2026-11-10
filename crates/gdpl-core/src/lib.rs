@@ -96,6 +96,9 @@ pub trait StressScenarioProvider {
     fn check_health(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+    fn cancel(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn reset(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -111,6 +114,10 @@ pub trait StressScenarioProvider {
     fn metric_definitions(
         &self,
     ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
+        None
+    }
+    /// Host and provider clock correlation, when available.
+    fn clock_correlation(&self) -> Option<gdpl_adapter_sdk::ClockCorrelation> {
         None
     }
     /// Provider-reported values have no implicit unit or trust guarantee.

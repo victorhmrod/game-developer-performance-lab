@@ -51,12 +51,15 @@ pub struct External {
     state: gdpl_adapter_sdk::State,
     controlled: bool,
     supports_reset: bool,
+    supports_cancel: bool,
     supports_metrics: bool,
     metric_metadata: Option<std::collections::BTreeMap<String, String>>,
     provider_info: Option<std::collections::BTreeMap<String, String>>,
     metric_definitions:
         Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>>,
     timeout: Duration,
+    clock_origin: Instant,
+    clock_correlation: Option<gdpl_adapter_sdk::ClockCorrelation>,
 }
 
 impl External {
@@ -72,11 +75,14 @@ impl External {
             state: gdpl_adapter_sdk::State::Connected,
             controlled: false,
             supports_reset: false,
+            supports_cancel: false,
             supports_metrics: false,
             metric_metadata: None,
             provider_info: None,
             metric_definitions: None,
             timeout: Duration::from_secs(2),
+            clock_origin: Instant::now(),
+            clock_correlation: None,
         }
     }
     fn request(&mut self, command: &str, value: Value) -> Result<Value, String> {
@@ -121,7 +127,12 @@ impl External {
         }
         if response["ok"] != true {
             return Err(format!(
-                "workload rejected {command}: {}",
+                "workload rejected {command} (request {}, code {}): {}",
+                self.sequence,
+                response
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unspecified"),
                 response["error"]
             ));
         }
@@ -235,7 +246,46 @@ impl StressScenarioProvider for External {
         }
         let capabilities = hello["capabilities"].as_array().unwrap();
         self.supports_reset = capabilities.iter().any(|value| value == "reset");
+        self.supports_cancel = capabilities.iter().any(|value| value == "cancel");
         self.supports_metrics = capabilities.iter().any(|value| value == "metrics");
+        if capabilities.iter().any(|value| value == "clock_sync") {
+            let mut exchanges = Vec::new();
+            for _ in 0..5 {
+                let sent = self.clock_origin.elapsed().as_micros() as u64;
+                let response = self.request("clock_sync", json!({}))?;
+                let received = self.clock_origin.elapsed().as_micros() as u64;
+                if let (Some(adapter_receive), Some(adapter_send)) = (
+                    protocol_integer(&response["adapter_receive_us"]),
+                    protocol_integer(&response["adapter_send_us"]),
+                ) && let Some(exchange) = gdpl_adapter_sdk::ClockExchange::new(
+                    sent,
+                    adapter_receive,
+                    adapter_send,
+                    received,
+                ) {
+                    exchanges.push(exchange);
+                }
+            }
+            if exchanges.len() >= 3 {
+                let mut offsets: Vec<f64> =
+                    exchanges.iter().map(|sample| sample.offset_us).collect();
+                offsets.sort_by(f64::total_cmp);
+                let spread = offsets[offsets.len() - 1] - offsets[0];
+                let best = exchanges
+                    .iter()
+                    .min_by_key(|sample| sample.round_trip_us)
+                    .unwrap();
+                self.clock_correlation = Some(gdpl_adapter_sdk::ClockCorrelation {
+                    estimated_offset_us: best.offset_us,
+                    uncertainty_estimate_us: best.round_trip_us as f64 / 2.0 + spread / 2.0 + 1.0,
+                    offset_spread_us: spread,
+                    age_us: 0,
+                    quality: "inconclusive".into(),
+                    assumptions: "Host clock origin is provider creation; adapter origin is engine startup. Half RTT assumes symmetric delay and is not a guaranteed bound; drift is not measured.".into(),
+                    exchanges,
+                });
+            }
+        }
         if let Some(info) = hello.get("provider_info") {
             let entries = info.as_object().ok_or("provider_info must be an object")?;
             if entries.len() > 16 {
@@ -311,6 +361,12 @@ impl StressScenarioProvider for External {
         self.request("initialize", json!({"scenario": scenario.id, "parameters": scenario.parameters, "maximum_load": scenario.maximum_load}))?;
         Ok(())
     }
+    fn cancel(&mut self) -> Result<(), String> {
+        if self.supports_cancel {
+            self.request("cancel", json!({}))?;
+        }
+        Ok(())
+    }
     fn reset(&mut self) -> Result<(), String> {
         if self.supports_reset {
             self.request("reset", json!({}))?;
@@ -327,6 +383,12 @@ impl StressScenarioProvider for External {
         &self,
     ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
         self.metric_definitions.clone()
+    }
+    fn clock_correlation(&self) -> Option<gdpl_adapter_sdk::ClockCorrelation> {
+        let mut result = self.clock_correlation.clone()?;
+        result.age_us = (self.clock_origin.elapsed().as_micros() as u64)
+            .saturating_sub(result.exchanges.last()?.host_receive_us);
+        Some(result)
     }
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
         if !self.supports_metrics {

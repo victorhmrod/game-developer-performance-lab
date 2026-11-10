@@ -52,6 +52,10 @@ fn godot_headless_end_to_end() {
             report["target_pid"].as_u64().unwrap()
         );
         assert_eq!(report["cleanup"], "completed");
+        let clock = &report["clock_correlation"];
+        assert!(clock["exchanges"].as_array().unwrap().len() >= 3);
+        assert_eq!(clock["quality"], "inconclusive");
+        assert!(clock["uncertainty_estimate_us"].as_f64().unwrap() >= 0.0);
         assert_eq!(report["maximum_acknowledged_load"], 2);
         assert!(report["provider_metric_metadata"]["godot_clock_us"].is_string());
         assert!(
@@ -63,6 +67,16 @@ fn godot_headless_end_to_end() {
         assert!(report["maximum_validated_load"].is_null());
         for stage in report["stages"].as_array().unwrap() {
             assert_eq!(stage["status"], "completed");
+            let timing = &stage["timing"];
+            assert!(
+                timing["workload_requested_us"].as_u64().unwrap()
+                    <= timing["workload_acknowledged_us"].as_u64().unwrap()
+            );
+            assert!(
+                timing["measurement_started_us"].as_u64().unwrap()
+                    < timing["measurement_completed_us"].as_u64().unwrap()
+            );
+            assert!(timing["observed_measurement_us"].as_u64().unwrap() > 0);
             let load = stage["load"].as_f64().unwrap();
             let metrics = &stage["provider_metric_summaries"];
             assert_eq!(
@@ -147,6 +161,10 @@ fn godot_protocol_conformance() {
         hello["metric_definitions"]["godot_fps"]["timestamp_domain"],
         "unavailable"
     );
+    let clock = request(1, "clock_sync", json!({}));
+    assert!(
+        clock["adapter_receive_us"].as_f64().unwrap() <= clock["adapter_send_us"].as_f64().unwrap()
+    );
     assert_eq!(
         request(1, "list_scenarios", json!({}))["scenarios"][0]["id"],
         "external_process"
@@ -166,6 +184,12 @@ fn godot_protocol_conformance() {
         request(1, "metrics", json!({}))["metrics"]["godot_workload_count"].as_f64(),
         Some(4.0)
     );
+    assert_eq!(request(1, "cancel", json!({}))["ok"], true);
+    assert_eq!(
+        request(1, "metrics", json!({}))["metrics"]["godot_workload_count"].as_f64(),
+        Some(0.0)
+    );
+    assert_eq!(request(1, "set_load", json!({"load": 2}))["ready"], true);
     assert_eq!(request(1, "reset", json!({}))["ok"], true);
     assert_eq!(
         request(1, "metrics", json!({}))["metrics"]["godot_workload_count"].as_f64(),
@@ -173,4 +197,34 @@ fn godot_protocol_conformance() {
     );
     assert_eq!(request(1, "shutdown", json!({}))["ok"], true);
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+#[ignore = "requires a Godot engine executable in GDPL_GODOT"]
+fn godot_runner_cancels_and_reaps_owned_process() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../adapters/godot/example")
+        .canonicalize()
+        .unwrap();
+    let external = json!({"mode":"launch","executable":std::env::var("GDPL_GODOT").unwrap(),"arguments":["--no-header","--headless","--path",project],"working_directory":null,"controlled":true,"timeout_ms":3000});
+    let config: gdpl_stress::Config = serde_json::from_value(json!({
+        "scenario":{"id":"external_process","parameters":{"workload":"nodes"},"initial_load":4,"load_increment":1,"maximum_load":4,"measurement_seconds":20,"maximum_duration_seconds":30,"maximum_memory_bytes":1073741824,"minimum_fps":null},
+        "strategy":"fixed","warmup_seconds":0,"repetitions":1,"maximum_cpu_percent":null,"sustained_samples":2,"external":external
+    })).unwrap();
+    let mut provider = gdpl_stress::external::External::new(config.external.clone().unwrap());
+    let cancelled = AtomicBool::new(false);
+    let report = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_secs(2));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+        gdpl_stress::run(config, &mut provider, &cancelled).unwrap()
+    });
+    assert_eq!(report.termination, "cancelled");
+    assert_eq!(report.cleanup, "completed");
+    assert!(report.diagnostic.is_none(), "{:?}", report.diagnostic);
+    let pid = sysinfo::Pid::from_u32(report.target_pid.unwrap());
+    assert!(sysinfo::System::new_all().process(pid).is_none());
 }

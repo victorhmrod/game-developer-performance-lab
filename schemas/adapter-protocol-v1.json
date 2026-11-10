@@ -58,6 +58,14 @@
           "additionalProperties": {
             "$ref": "#/$defs/metric_definition"
           }
+        },
+        "adapter_receive_us": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "adapter_send_us": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }
@@ -119,5 +127,6 @@
         }
       }
     }
-  }
+  },
+  "description": "Newline-delimited JSON over supervised stdin/stdout. Optional clock_sync replies include adapter_receive_us and adapter_send_us in the adapter monotonic clock domain."
 }

@@ -7,6 +7,13 @@ fn main() {
         let line = line.unwrap();
         let id = line.split("\"id\":").nth(1).unwrap().split([',','}']).next().unwrap();
         if mode == "hang" { std::thread::sleep(Duration::from_secs(10)); return; }
+        if mode == "bad_json" { writeln!(output, "not json").unwrap(); output.flush().unwrap(); return; }
+        if mode == "bad_id" { writeln!(output, "{{\"version\":1,\"id\":999,\"ok\":true}}").unwrap(); output.flush().unwrap(); return; }
+        if mode == "fragmented" && line.contains("\"hello\"") {
+            write!(output, "{{\"version\":1,").unwrap(); output.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            writeln!(output, "\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"]}}").unwrap(); output.flush().unwrap(); continue;
+        }
         if mode == "bad_version" { writeln!(output, "{{\"version\":2,\"id\":{id},\"ok\":true}}").unwrap(); output.flush().unwrap(); return; }
         if mode == "float_numbers" {
             if line.contains("\"hello\"") { writeln!(output, "{{\"version\":1.0,\"id\":{id}.0,\"ok\":true,\"capabilities\":[\"set_load\"]}}").unwrap(); }

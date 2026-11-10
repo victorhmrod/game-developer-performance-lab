@@ -113,6 +113,8 @@ fn fault_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 fn protocol_failures_remain_distinct_and_incomplete() {
     for mode in [
         "bad_version",
+        "bad_id",
+        "bad_json",
         "missing_capability",
         "missing_scenario",
         "bad_metadata",
@@ -134,8 +136,8 @@ fn protocol_failures_remain_distinct_and_incomplete() {
         assert_eq!(status.code(), Some(5), "{mode}: {report}");
         let termination = report["termination"].as_str().unwrap();
         match mode {
-            "bad_version" | "bad_metadata" | "bad_pid" | "hang" | "missing_capability"
-            | "missing_scenario" => {
+            "bad_version" | "bad_id" | "bad_json" | "bad_metadata" | "bad_pid" | "hang"
+            | "missing_capability" | "missing_scenario" => {
                 assert_eq!(termination, "initialization_failed")
             }
             "bad_ack" | "bad_observed" => {
@@ -199,4 +201,19 @@ fn accepts_exact_float_protocol_numbers() {
     );
     assert!(status.success(), "{report}");
     assert_eq!(report["maximum_acknowledged_load"], 1);
+}
+
+#[test]
+fn accepts_fragmented_ipc_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fault_fixture(temp.path());
+    let (status, report) = execute(
+        temp.path(),
+        config(
+            json!({"mode":"launch","executable":fixture,"arguments":["fragmented"],"working_directory":null,"controlled":true,"timeout_ms":1000}),
+            1,
+        ),
+    );
+    assert!(status.success(), "{report}");
+    assert_eq!(report["termination"], "completed");
 }

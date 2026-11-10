@@ -27,6 +27,7 @@ var state_lock := Mutex.new()
 var stopping := false
 var initialized := false
 var negotiated := false
+var last_request_id := 0
 var workload_kind := ""
 var maximum_load := 0
 var workload_root: Node3D
@@ -82,6 +83,7 @@ func _disconnected() -> void:
     get_tree().quit(1)
 
 func _on_request(line: String) -> void:
+    var receive_us := Time.get_ticks_usec()
     var parsed = JSON.parse_string(line)
     if not parsed is Dictionary:
         _reply({"version": 1, "id": 0, "ok": false, "error": "invalid JSON object"})
@@ -91,9 +93,14 @@ func _on_request(line: String) -> void:
     var id = request.get("id", 0)
     var reply := {"version": 1, "id": id, "ok": true}
     var data = request.get("data", {})
-    if request.get("version") != 1 or not data is Dictionary:
+    if not (id is float or id is int) or id <= last_request_id or id != floor(id):
+        reply["ok"] = false
+        reply["error"] = "request id must be a strictly increasing positive integer"
+        reply["error_code"] = "invalid_request"
+    elif request.get("version") != 1 or not data is Dictionary:
         reply["ok"] = false
         reply["error"] = "unsupported protocol version or data"
+        reply["error_code"] = "unsupported_version" if request.get("version") != 1 else "invalid_request"
     elif request.get("command", "") != "hello" and request.get("command", "") != "shutdown" and not negotiated:
         reply["ok"] = false
         reply["error"] = "handshake required"
@@ -104,14 +111,17 @@ func _on_request(line: String) -> void:
                 if negotiated or not data.get("versions", []) is Array or not data.get("versions", []).has(1.0):
                     reply["ok"] = false
                     reply["error"] = "unsupported version or handshake already completed"
-                    reply["error_code"] = "negotiation_failed"
+                    reply["error_code"] = "invalid_state" if negotiated else "unsupported_version"
                 else:
                     negotiated = true
-                    reply["capabilities"] = ["set_load", "reset", "metrics", "shutdown", "list_scenarios"]
+                    reply["capabilities"] = ["set_load", "reset", "metrics", "shutdown", "list_scenarios", "clock_sync", "cancel"]
                     reply["scenarios"] = LIMITS.keys()
                     reply["metric_metadata"] = METADATA
                     reply["metric_definitions"] = _metric_definitions()
                     reply["provider_info"] = {"name": "GDPL Godot example", "platform": OS.get_name(), "engine": "Godot", "process_id": str(OS.get_process_id()), "engine_version": str(Engine.get_version_info().get("string", "unknown")), "adapter_version": "0.1.0", "display_backend": DisplayServer.get_name(), "video_adapter": RenderingServer.get_video_adapter_name(), "video_vendor": RenderingServer.get_video_adapter_vendor(), "graphics_api": RenderingServer.get_video_adapter_api_version()}
+            "clock_sync":
+                reply["adapter_receive_us"] = receive_us
+                reply["adapter_send_us"] = Time.get_ticks_usec()
             "list_scenarios":
                 reply["scenarios"] = [{"id": "external_process", "workloads": LIMITS}]
             "initialize":
@@ -119,7 +129,7 @@ func _on_request(line: String) -> void:
                 if initialized or data.get("scenario") != "external_process" or not params is Dictionary or params.keys().any(func(key): return key != "workload"):
                     reply["ok"] = false
                     reply["error"] = "invalid state, scenario or parameters"
-                    reply["error_code"] = "invalid_scenario"
+                    reply["error_code"] = "invalid_state" if initialized else "unknown_scenario"
                 else:
                     var kind := str(params.get("workload", "nodes"))
                     var ceiling := int(data.get("maximum_load", -1))
@@ -130,7 +140,7 @@ func _on_request(line: String) -> void:
                         workload_kind = kind
                         maximum_load = ceiling
                         initialized = true
-            "reset":
+            "reset", "cancel":
                 if not initialized:
                     reply["ok"] = false
                     reply["error"] = "scenario not initialized"
@@ -168,6 +178,14 @@ func _on_request(line: String) -> void:
             _:
                 reply["ok"] = false
                 reply["error"] = "unsupported command"
+    if id is float or id is int:
+        if id > last_request_id and id == floor(id): last_request_id = int(id)
+    if not reply["ok"] and not reply.has("error_code"):
+        match request.get("command", ""):
+            "initialize": reply["error_code"] = "initialization_failed"
+            "set_load": reply["error_code"] = "invalid_workload"
+            "metrics": reply["error_code"] = "invalid_state"
+            _: reply["error_code"] = "unsupported_capability"
     _reply(reply)
     gate.post()
     if stopping:

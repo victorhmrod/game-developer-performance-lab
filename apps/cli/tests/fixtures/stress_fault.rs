@@ -7,6 +7,10 @@ fn main() {
         let line = line.unwrap();
         let id = line.split("\"id\":").nth(1).unwrap().split([',','}']).next().unwrap();
         if mode == "hang" { std::thread::sleep(Duration::from_secs(10)); return; }
+        if mode == "stop_reading" && line.contains("\"hello\"") {
+            writeln!(output, "{{\"version\":1,\"id\":{id},\"ok\":true,\"capabilities\":[\"set_load\"]}}").unwrap(); output.flush().unwrap();
+            std::thread::sleep(Duration::from_secs(10)); return;
+        }
         if mode == "bad_json" { writeln!(output, "not json").unwrap(); output.flush().unwrap(); return; }
         if mode == "bad_id" { writeln!(output, "{{\"version\":1,\"id\":999,\"ok\":true}}").unwrap(); output.flush().unwrap(); return; }
         if mode == "fragmented" && line.contains("\"hello\"") {

@@ -116,8 +116,19 @@ pub trait StressScenarioProvider {
     ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
         None
     }
+    /// Collect a clock exchange outside the measurement window when supported.
+    fn refresh_clock(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     /// Host and provider clock correlation, when available.
     fn clock_correlation(&self) -> Option<gdpl_adapter_sdk::ClockCorrelation> {
+        None
+    }
+    /// Temporal metadata from the latest successful metric collection.
+    fn metric_observations(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::MetricObservation>>
+    {
         None
     }
     /// Provider-reported values have no implicit unit or trust guarantee.

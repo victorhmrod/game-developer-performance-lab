@@ -217,3 +217,20 @@ fn accepts_fragmented_ipc_response() {
     assert!(status.success(), "{report}");
     assert_eq!(report["termination"], "completed");
 }
+
+#[test]
+fn nonreading_peer_times_out_and_is_reaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fault_fixture(temp.path());
+    let mut plan = config(
+        json!({"mode":"launch","executable":fixture,"arguments":["stop_reading"],"working_directory":null,"controlled":true,"timeout_ms":300}),
+        1,
+    );
+    plan["scenario"]["parameters"] = json!({"padding": "x".repeat(7600)});
+    let (status, report) = execute(temp.path(), plan);
+    assert_eq!(status.code(), Some(5), "{report}");
+    assert_eq!(report["termination"], "initialization_failed");
+    assert!(report["diagnostic"].as_str().unwrap().contains("timeout"));
+    let pid = sysinfo::Pid::from_u32(report["target_pid"].as_u64().unwrap() as u32);
+    assert!(sysinfo::System::new_all().process(pid).is_none());
+}

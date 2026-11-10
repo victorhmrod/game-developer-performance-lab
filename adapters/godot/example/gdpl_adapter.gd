@@ -32,6 +32,8 @@ var workload_kind := ""
 var maximum_load := 0
 var workload_root: Node3D
 var last_frame_tick := 0
+var process_interval_start_us := 0
+var process_interval_end_us := 0
 var process_interval_ms := 0.0
 
 func _ready() -> void:
@@ -51,6 +53,8 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
     var now := Time.get_ticks_usec()
     if last_frame_tick > 0:
+        process_interval_start_us = last_frame_tick
+        process_interval_end_us = now
         process_interval_ms = float(now - last_frame_tick) / 1000.0
     last_frame_tick = now
 
@@ -169,7 +173,11 @@ func _on_request(line: String) -> void:
                     reply["ok"] = false
                     reply["error"] = "scenario not initialized"
                 else:
-                    reply["metrics"] = _metrics()
+                    var acquisition_start := Time.get_ticks_usec()
+                    var values := _metrics()
+                    var acquisition_end := Time.get_ticks_usec()
+                    reply["metrics"] = values
+                    reply["metric_observations"] = _observations(values, acquisition_start, acquisition_end)
             "shutdown":
                 _clear_workload()
                 state_lock.lock()
@@ -192,11 +200,25 @@ func _on_request(line: String) -> void:
         reader.wait_to_finish()
         get_tree().quit()
 
+func _observations(values: Dictionary, started: int, finished: int) -> Dictionary:
+    var result := {}
+    var direct := ["godot_clock_us", "godot_workload_count", "godot_processing_nodes", "godot_animation_playing", "godot_animation_position_sum_s"]
+    for id in values:
+        var is_direct: bool = id in direct
+        result[id] = {"clock_domain": "engine_monotonic", "acquisition_timestamp_us": values[id] if id == "godot_clock_us" else null, "interval_start_us": started if is_direct else null, "interval_end_us": finished if is_direct else null, "generated_us": finished, "resolution_us": null, "quality": "direct_interval" if is_direct else "periodic_snapshot_unknown_interval", "provenance": "adapter synchronous read" if is_direct else "Godot monitor snapshot; acquisition interval unknown"}
+        if id == "godot_process_interval_ms":
+            result[id]["interval_start_us"] = process_interval_start_us
+            result[id]["interval_end_us"] = process_interval_end_us
+            result[id]["quality"] = "direct_interval"
+            result[id]["provenance"] = "monotonic interval between adapter _process callbacks; not displayed-frame time"
+    return result
+
 func _metric_definitions() -> Dictionary:
     var units := {"godot_clock_us": "microseconds", "godot_process_interval_ms": "milliseconds", "godot_fps": "frames/second", "godot_process_ms": "milliseconds", "godot_physics_ms": "milliseconds", "godot_node_count": "nodes", "godot_workload_count": "objects", "godot_processing_nodes": "nodes", "godot_physics_active": "bodies", "godot_physics_pairs": "pairs", "godot_animation_playing": "players", "godot_animation_position_sum_s": "seconds", "godot_render_draw_calls": "draw_calls", "godot_render_objects": "objects", "godot_render_primitives": "primitives"}
     var result := {}
+    var timed := ["godot_clock_us", "godot_workload_count", "godot_processing_nodes", "godot_animation_playing", "godot_animation_position_sum_s", "godot_process_interval_ms"]
     for id in METADATA:
-        result[id] = {"name": id, "unit": units[id], "data_type": "number", "source": "godot_adapter", "sampling_method": "polled snapshot", "timestamp_domain": "unavailable", "availability": "conditional", "diagnostic": METADATA[id]}
+        result[id] = {"name": id, "unit": units[id], "data_type": "number", "source": "godot_adapter", "sampling_method": "polled snapshot", "timestamp_domain": "engine_monotonic" if id in timed else "unavailable", "availability": "conditional", "diagnostic": METADATA[id]}
     return result
 
 func _reply(message: Dictionary) -> void:

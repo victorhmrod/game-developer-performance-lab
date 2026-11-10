@@ -66,6 +66,13 @@
         "adapter_send_us": {
           "type": "integer",
           "minimum": 0
+        },
+        "metric_observations": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": {
+            "$ref": "#/$defs/metric_observation"
+          }
         }
       }
     }
@@ -124,6 +131,76 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "metric_observation": {
+      "type": "object",
+      "required": [
+        "clock_domain",
+        "acquisition_timestamp_us",
+        "interval_start_us",
+        "interval_end_us",
+        "generated_us",
+        "resolution_us",
+        "quality",
+        "provenance"
+      ],
+      "properties": {
+        "clock_domain": {
+          "enum": [
+            "host_monotonic",
+            "engine_monotonic",
+            "external_capture",
+            "os_telemetry",
+            "unavailable"
+          ]
+        },
+        "acquisition_timestamp_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "interval_start_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "interval_end_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "generated_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "resolution_us": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "quality": {
+          "enum": [
+            "direct_interval",
+            "periodic_snapshot_unknown_interval",
+            "unavailable"
+          ]
+        },
+        "provenance": {
+          "type": "string",
+          "maxLength": 512
         }
       }
     }

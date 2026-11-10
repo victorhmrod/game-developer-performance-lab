@@ -152,6 +152,8 @@ pub struct ClockCorrelation {
     pub uncertainty_estimate_us: f64,
     pub offset_spread_us: f64,
     pub age_us: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drift_model: Option<temporal::ClockModel>,
     pub quality: String,
     pub assumptions: String,
 }
@@ -200,3 +202,5 @@ mod tests {
         );
     }
 }
+
+pub mod temporal;

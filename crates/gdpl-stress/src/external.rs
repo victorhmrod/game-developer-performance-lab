@@ -57,6 +57,8 @@ pub struct External {
     provider_info: Option<std::collections::BTreeMap<String, String>>,
     metric_definitions:
         Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>>,
+    observations:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::MetricObservation>>,
     timeout: Duration,
     clock_origin: Instant,
     clock_correlation: Option<gdpl_adapter_sdk::ClockCorrelation>,
@@ -80,6 +82,7 @@ impl External {
             metric_metadata: None,
             provider_info: None,
             metric_definitions: None,
+            observations: None,
             timeout: Duration::from_secs(2),
             clock_origin: Instant::now(),
             clock_correlation: None,
@@ -280,6 +283,7 @@ impl StressScenarioProvider for External {
                     uncertainty_estimate_us: best.round_trip_us as f64 / 2.0 + spread / 2.0 + 1.0,
                     offset_spread_us: spread,
                     age_us: 0,
+                    drift_model: None,
                     quality: "inconclusive".into(),
                     assumptions: "Host clock origin is provider creation; adapter origin is engine startup. Half RTT assumes symmetric delay and is not a guaranteed bound; drift is not measured.".into(),
                     exchanges,
@@ -384,13 +388,48 @@ impl StressScenarioProvider for External {
     ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::MetricDefinition>> {
         self.metric_definitions.clone()
     }
+    fn refresh_clock(&mut self) -> Result<(), String> {
+        let Some(correlation) = &self.clock_correlation else {
+            return Ok(());
+        };
+        if self.clock_origin.elapsed().as_micros() as u64
+            - correlation.exchanges.last().unwrap().host_receive_us
+            < 10_000_000
+        {
+            return Ok(());
+        }
+        let sent = self.clock_origin.elapsed().as_micros() as u64;
+        let response = self.request("clock_sync", json!({}))?;
+        let received = self.clock_origin.elapsed().as_micros() as u64;
+        if let (Some(adapter_receive), Some(adapter_send)) = (
+            protocol_integer(&response["adapter_receive_us"]),
+            protocol_integer(&response["adapter_send_us"]),
+        ) && let Some(exchange) =
+            gdpl_adapter_sdk::ClockExchange::new(sent, adapter_receive, adapter_send, received)
+        {
+            self.clock_correlation
+                .as_mut()
+                .unwrap()
+                .exchanges
+                .push(exchange);
+        }
+        Ok(())
+    }
     fn clock_correlation(&self) -> Option<gdpl_adapter_sdk::ClockCorrelation> {
         let mut result = self.clock_correlation.clone()?;
+        result.drift_model = gdpl_adapter_sdk::temporal::fit_clock(&result.exchanges);
         result.age_us = (self.clock_origin.elapsed().as_micros() as u64)
             .saturating_sub(result.exchanges.last()?.host_receive_us);
         Some(result)
     }
+    fn metric_observations(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::MetricObservation>>
+    {
+        self.observations.clone()
+    }
     fn metrics(&mut self) -> Result<Option<std::collections::BTreeMap<String, f64>>, String> {
+        self.observations = None;
         if !self.supports_metrics {
             return Ok(None);
         }
@@ -414,6 +453,25 @@ impl StressScenarioProvider for External {
                 .filter(|n| n.is_finite())
                 .ok_or("provider metric must be finite")?;
             result.insert(key.clone(), number);
+        }
+        if let Some(observations) = response.get("metric_observations") {
+            let observations: std::collections::BTreeMap<
+                String,
+                gdpl_adapter_sdk::temporal::MetricObservation,
+            > = serde_json::from_value(observations.clone())
+                .map_err(|e| format!("invalid metric observations: {e}"))?;
+            if observations.len() != result.len() || observations.iter().any(|(key, observation)| {
+                !result.contains_key(key)
+                    || observation.resolution_us == Some(0)
+                    || matches!((observation.interval_start_us, observation.interval_end_us), (Some(start), Some(end)) if start > end)
+                    || observation.interval_start_us.is_some() != observation.interval_end_us.is_some()
+                    || matches!((observation.interval_end_us, observation.generated_us), (Some(end), Some(generated)) if end > generated)
+                    || matches!((observation.acquisition_timestamp_us, observation.interval_start_us, observation.interval_end_us), (Some(timestamp), Some(start), Some(end)) if timestamp < start || timestamp > end)
+                    || matches!(observation.quality, gdpl_adapter_sdk::temporal::TemporalQuality::DirectInterval) && observation.interval_start_us.is_none()
+                    || matches!(observation.quality, gdpl_adapter_sdk::temporal::TemporalQuality::PeriodicSnapshotUnknownInterval) && (observation.interval_start_us.is_some() || observation.acquisition_timestamp_us.is_some())
+                    || observation.provenance.len() > 512
+            }) { return Err("invalid metric observation metadata".into()); }
+            self.observations = Some(observations);
         }
         Ok(Some(result))
     }

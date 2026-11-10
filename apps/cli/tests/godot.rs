@@ -77,6 +77,29 @@ fn godot_headless_end_to_end() {
                     < timing["measurement_completed_us"].as_u64().unwrap()
             );
             assert!(timing["observed_measurement_us"].as_u64().unwrap() > 0);
+            assert_eq!(
+                stage["provider_metric_summary_quality"],
+                "exploratory_unverified_timing"
+            );
+            assert!(
+                stage["validated_provider_metric_summaries"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+            let sample = &stage["samples"][0];
+            assert_eq!(
+                sample["provider_attribution"]["godot_workload_count"],
+                "temporally_ambiguous"
+            );
+            assert_eq!(
+                sample["provider_observations"]["godot_workload_count"]["quality"],
+                "direct_interval"
+            );
+            assert!(
+                sample["provider_observations"]["godot_workload_count"]["interval_start_us"]
+                    .is_number()
+            );
             let load = stage["load"].as_f64().unwrap();
             let metrics = &stage["provider_metric_summaries"];
             assert_eq!(

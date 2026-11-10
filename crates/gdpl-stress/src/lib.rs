@@ -39,6 +39,12 @@ pub struct Sample {
     pub process_memory_bytes: u64,
     pub process_cpu_percent: Option<f32>,
     pub provider_metrics: Option<std::collections::BTreeMap<String, f64>>,
+    pub provider_request_started_us: Option<u64>,
+    pub provider_response_received_us: Option<u64>,
+    pub provider_observations:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::MetricObservation>>,
+    pub provider_attribution:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::Attribution>>,
 }
 #[derive(Debug, Default, Serialize)]
 pub struct StageTiming {
@@ -57,6 +63,8 @@ pub struct ExcludedProviderSample {
     pub response_received_us: u64,
     pub reason: String,
     pub metrics: std::collections::BTreeMap<String, f64>,
+    pub observations:
+        Option<std::collections::BTreeMap<String, gdpl_adapter_sdk::temporal::MetricObservation>>,
 }
 #[derive(Debug, Serialize)]
 pub struct Stage {
@@ -74,6 +82,9 @@ pub struct Stage {
     pub peak_memory_bytes: Option<u64>,
     /// Statistics over polled provider snapshots, not per-frame distributions.
     pub provider_metric_summaries: std::collections::BTreeMap<String, MetricSummary>,
+    pub provider_metric_summary_quality: &'static str,
+    /// Reserved for samples whose complete acquisition interval is attributable under a verified model.
+    pub validated_provider_metric_summaries: std::collections::BTreeMap<String, MetricSummary>,
     pub missing_provider_metrics: Vec<String>,
     /// Responses received after the measurement boundary are not included.
     pub late_provider_responses: u64,
@@ -304,6 +315,9 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     termination = "duration_limit".into();
                     break 'loads;
                 }
+                provider
+                    .refresh_clock()
+                    .map_err(|e| format!("target failure: clock sync: {e}"))?;
                 maximum_attempted_load =
                     Some(maximum_attempted_load.map_or(load, |previous: u64| previous.max(load)));
                 let mut cpu_violations = 0;
@@ -323,6 +337,8 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                     mean_cpu_percent: None,
                     peak_memory_bytes: None,
                     provider_metric_summaries: Default::default(),
+                    provider_metric_summary_quality: "exploratory_unverified_timing",
+                    validated_provider_metric_summaries: Default::default(),
                     missing_provider_metrics: Vec::new(),
                     late_provider_responses: 0,
                     samples: Vec::new(),
@@ -461,6 +477,7 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                                 }
                             }
                         };
+                        let provider_returned_metrics = provider_metrics.is_some();
                         if provider_metrics.is_some()
                             && (stage_start.elapsed() >= total || cancelled.load(Ordering::SeqCst))
                         {
@@ -477,8 +494,19 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                                     }
                                     .into(),
                                     metrics: provider_metrics.take().unwrap(),
+                                    observations: provider.metric_observations(),
                                 });
                         }
+                        let response_received_us = start.elapsed().as_micros() as u64;
+                        let observations = provider_metrics
+                            .as_ref()
+                            .and_then(|_| provider.metric_observations());
+                        let attribution = provider_metrics.as_ref().map(|metrics| metrics.keys().map(|key| {
+                            let status = observations.as_ref().and_then(|values| values.get(key)).map_or(gdpl_adapter_sdk::temporal::Attribution::TimestampUnavailable, |observation| {
+                                if observation.interval_start_us.is_none() { gdpl_adapter_sdk::temporal::Attribution::TimestampUnavailable } else { gdpl_adapter_sdk::temporal::Attribution::TemporallyAmbiguous }
+                            });
+                            (key.clone(), status)
+                        }).collect());
                         // The preceding CPU interval can overlap warmup or a previous stage.
                         let measurement_cpu = if measurement_cpu_primed { cpu } else { None };
                         measurement_cpu_primed = true;
@@ -487,6 +515,12 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
                             process_memory_bytes: memory,
                             process_cpu_percent: measurement_cpu,
                             provider_metrics,
+                            provider_request_started_us: provider_returned_metrics
+                                .then_some(request_started_us),
+                            provider_response_received_us: provider_returned_metrics
+                                .then_some(response_received_us),
+                            provider_observations: observations,
+                            provider_attribution: attribution,
                         });
                     }
                     if termination != "completed" {
@@ -571,6 +605,12 @@ pub fn run<P: StressScenarioProvider<Error = String>>(
     }
     if target_pid.is_none() {
         target_pid = provider.target_pid();
+    }
+    if termination == "completed"
+        && let Err(error) = provider.refresh_clock()
+    {
+        termination = "target_failed".into();
+        diagnostic = Some(format!("final clock sync failed: {error}"));
     }
     let clock_correlation = provider.clock_correlation();
     if termination == "cancelled"
@@ -780,6 +820,8 @@ mod tests {
             mean_cpu_percent: None,
             peak_memory_bytes: None,
             provider_metric_summaries: Default::default(),
+            provider_metric_summary_quality: "exploratory_unverified_timing",
+            validated_provider_metric_summaries: Default::default(),
             missing_provider_metrics: Vec::new(),
             late_provider_responses: 0,
             samples: Vec::new(),
@@ -789,6 +831,10 @@ mod tests {
                 elapsed_ms: 0,
                 process_memory_bytes: 100,
                 process_cpu_percent: None,
+                provider_request_started_us: None,
+                provider_response_received_us: None,
+                provider_observations: None,
+                provider_attribution: None,
                 provider_metrics: Some(std::collections::BTreeMap::from([(
                     "frame_ms".into(),
                     value,
